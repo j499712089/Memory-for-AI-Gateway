@@ -112,3 +112,43 @@ func parseSourceIDs(value string) []string {
 	_ = json.Unmarshal([]byte(value), &ids)
 	return ids
 }
+
+// recentAssets returns the team's most recently updated assets as a retrieval
+// fallback when a query has no exact hits. Layer ordering is applied later by
+// Fuse (L4→L3→L2→L1→L0 priority weighting), and ACL filtering runs in
+// Pipeline.Search after this function returns.
+func recentAssets(ctx context.Context, database *sql.DB, teamID string, limit int) ([]Candidate, error) {
+	if database == nil {
+		return nil, fmt.Errorf("retrieval database is nil")
+	}
+	if teamID == "" {
+		return nil, fmt.Errorf("team id is required")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := database.QueryContext(ctx, `SELECT id, team_id, COALESCE(identity_card_id,''), asset_type, name, summary, source_event_ids, visibility, version, updated_at
+		FROM assets WHERE team_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?`, teamID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent assets: %w", err)
+	}
+	defer rows.Close()
+	var candidates []Candidate
+	for rows.Next() {
+		var c Candidate
+		var sourceJSON, updated string
+		if err := rows.Scan(&c.ID, &c.TeamID, &c.IdentityCardID, &c.AssetType, &c.Name, &c.Summary, &sourceJSON, &c.Visibility, &c.Version, &updated); err != nil {
+			return nil, err
+		}
+		c.Layer = c.AssetType
+		c.Snippet = c.Summary
+		c.Score = 0.1
+		c.UpdatedAt, _ = parseTime(updated)
+		c.SourceEventIDs = parseSourceIDs(sourceJSON)
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}

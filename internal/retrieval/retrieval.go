@@ -48,6 +48,18 @@ func (p *Pipeline) Search(ctx context.Context, request Request) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
+	// When the query produces no exact hits (or there is no query text at
+	// all), fall back to the team's most recent assets so the LLM path still
+	// injects current team context instead of an empty package (V2.1/V2.4:
+	// 按需回退 L1/L0). The recency query is team-scoped and the ACL filter
+	// below still applies.
+	if len(candidates) == 0 {
+		recent, recentErr := recentAssets(searchCtx, p.database, request.TeamID, searchLimit)
+		if recentErr != nil {
+			return Result{}, recentErr
+		}
+		candidates = recent
+	}
 	subject := acl.Subject{TeamID: request.TeamID, AgentID: request.AgentID, UserID: request.UserID, Role: request.Role, IdentityCardID: request.IdentityCardID}
 	visible := make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {

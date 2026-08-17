@@ -162,7 +162,13 @@ func WriteLocalBuffer(ctx context.Context, database *sql.DB, memoryRoot string, 
 		// retry of the same logical event (same BufferKey) refreshes the row
 		// to match the overwritten file while keeping its status, so recovery
 		// never sees a hash mismatch and no duplicate rows accumulate.
-		_, _ = database.ExecContext(ctx, `
+		//
+		// The insert runs on a non-cancellable context: this method is called
+		// with an already-cancelled request context when a terminal event is
+		// recorded after a client disconnect, and losing the ledger row would
+		// orphan the file — the buffered event would never be replayed back
+		// into SQLite, leaving a ghost turn with no terminal status.
+		_, _ = database.ExecContext(context.WithoutCancel(ctx), `
 			INSERT INTO local_buffer (
 				id, event_id, request_id, turn_id, payload_json, status,
 				file_path, sha256, created_at

@@ -7,16 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"gateway/internal/adapter"
+	"gateway/internal/binding"
 	"gateway/internal/db"
 	"gateway/internal/hashutil"
 	"gateway/internal/idgen"
+	"gateway/internal/inject"
 	"gateway/internal/l0"
 	"gateway/internal/secrets"
 	"gateway/internal/turn"
@@ -26,6 +30,14 @@ import (
 )
 
 const idempotencyTTL = 24 * time.Hour
+
+// defaultInjectionTokenBudget caps how many tokens of retrieved memory context
+// are injected into one upstream request (Specify §6.4: hard cap token budget,
+// exceed → memory_truncated=true). Overridable via MEMORY_TOKEN_BUDGET.
+const defaultInjectionTokenBudget = 3000
+
+// defaultInjectionLimit caps how many retrieved assets are injected.
+const defaultInjectionLimit = 20
 
 var errChannelDisabled = errors.New("upstream channel is disabled")
 
@@ -47,6 +59,8 @@ type GatewayHandler struct {
 	secretsManager *secrets.Manager
 	memoryRoot     string
 	upstreamClient *adapter.UpstreamClient
+	teamsDir       string
+	tokenBudget    int
 
 	// sqliteWriteProbe and bufferWriteProbe are test seams for the recording
 	// degradation gate. nil means the sink is considered writable; returning a
@@ -57,11 +71,19 @@ type GatewayHandler struct {
 
 // NewGatewayHandler creates a new gateway handler.
 func NewGatewayHandler(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string) *GatewayHandler {
+	tokenBudget := defaultInjectionTokenBudget
+	if raw := os.Getenv("MEMORY_TOKEN_BUDGET"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			tokenBudget = n
+		}
+	}
 	return &GatewayHandler{
 		db:             db,
 		secretsManager: secretsManager,
 		memoryRoot:     memoryRoot,
 		upstreamClient: adapter.NewUpstreamClient(120 * time.Second),
+		teamsDir:       filepath.Join(memoryRoot, "teams"),
+		tokenBudget:    tokenBudget,
 	}
 }
 
@@ -151,8 +173,28 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		return
 	}
 
-	injectionPkg := adapter.BuildInjectionPackage(teamID, "", "")
-	injectionText := adapter.RenderInjectionText(injectionPkg)
+	turnID := idgen.NewTurnID()
+	conversationID := c.GetHeader("X-Conversation-ID")
+	if conversationID == "" {
+		conversationID = requestID
+	}
+
+	// Resolve the conversation's session binding (team/agent/identity card) so
+	// retrieval is scoped to the correct identity (V4.5 binding isolation). A
+	// binding failure degrades to an empty subject and never blocks the LLM
+	// path (传话者协议: 绑定缺失进入隔离区并告警，但仍写 L0).
+	sessionID, agentID, identityCardID := h.resolveSession(c, conversationID, teamID, upstreamChannel.ID)
+
+	// Phase 3 injection: approved path manifest + active identity card +
+	// ACL-filtered retrieval with token budget and L4→L3→L2→L1→L0 layer
+	// ordering (V2.1-V2.4, V4.1-V4.5). On retrieval failure degrade to a
+	// manifest-only package so the LLM path still flows.
+	injectionPkg, injectionText, err := h.buildLLMInjection(c.Request.Context(), teamID, agentID, identityCardID, inbound)
+	if err != nil {
+		log.Printf("injection build degraded (request %s): %v", requestID, err)
+		injectionPkg = adapter.InjectionPackage{ManifestVersion: inject.ManifestVersion}
+		injectionText = inject.Render(injectionPkg)
+	}
 	injectedBody, err := buildInjectedRequest(protocol, body, injectionText)
 	if err != nil {
 		writeGatewayError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("Failed to inject memory: %v", err), requestID)
@@ -184,15 +226,6 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		}
 	}
 
-	turnID := idgen.NewTurnID()
-	// Phase 2 has no binding resolver yet. Keep the nullable foreign key empty
-	// rather than manufacturing a session row that does not exist.
-	sessionID := ""
-	conversationID := c.GetHeader("X-Conversation-ID")
-	if conversationID == "" {
-		conversationID = requestID
-	}
-
 	inboundEventID := idgen.NewEventID()
 	inboundRecord := inboundRecord{
 		TurnID:         turnID,
@@ -205,6 +238,7 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		IdempotencyKey: idempotencyKey,
 		InjectionPkg:   injectionPkg,
 		InjectionText:  injectionText,
+		TokenBudget:    h.tokenBudget,
 	}
 	degraded, err := h.recordInbound(c.Request.Context(), inboundRecord)
 	if err != nil {
@@ -249,6 +283,7 @@ type inboundRecord struct {
 	IdempotencyKey string
 	InjectionPkg   adapter.InjectionPackage
 	InjectionText  string
+	TokenBudget    int
 }
 
 // terminalRecord carries everything needed to durably record one terminal event.
@@ -307,7 +342,7 @@ func (h *GatewayHandler) persistInboundToSQLite(ctx context.Context, in inboundR
 	if err := h.registerEventFile(in.EventID, l0Path, contentHash); err != nil {
 		return err
 	}
-	if err := h.recordInjectionSnapshot(in.RequestID, in.TurnID, in.InjectionPkg, in.InjectionText); err != nil {
+	if err := h.recordInjectionSnapshot(in.RequestID, in.TurnID, in.InjectionPkg, in.InjectionText, in.TokenBudget); err != nil {
 		return err
 	}
 	return nil
@@ -370,12 +405,16 @@ func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr termina
 			return err
 		}
 	}
-	if _, err := turn.WriteTerminalStatusWithID(h.db, tr.EventID, tr.TurnID, tr.RequestID, tr.ConversationID, tr.SessionID, tr.TeamID, tr.Status, tr.ErrorMsg); err != nil {
+	recordedEventID, err := turn.WriteTerminalStatusWithID(h.db, tr.EventID, tr.TurnID, tr.RequestID, tr.ConversationID, tr.SessionID, tr.TeamID, tr.Status, tr.ErrorMsg)
+	if err != nil {
 		return err
 	}
 	if tr.ContentHash != "" && tr.ContentPath != "" {
-		_ = turn.SetEventContent(h.db, tr.EventID, tr.ContentHash, tr.ContentPath)
-		_ = h.registerEventFile(tr.EventID, tr.ContentPath, tr.ContentHash)
+		// WriteTerminalStatusWithID is idempotent: on a no-op or a superseded
+		// cancelled placeholder it returns the event id that is actually
+		// recorded, so the response content is attached to the real event.
+		_ = turn.SetEventContent(h.db, recordedEventID, tr.ContentHash, tr.ContentPath)
+		_ = h.registerEventFile(recordedEventID, tr.ContentPath, tr.ContentHash)
 	}
 	return nil
 }
@@ -452,7 +491,9 @@ func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChan
 		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to write L0 response", requestID)
 		return
 	}
-	if _, terminalDegraded, err := h.recordTerminalResult(c.Request.Context(), terminalRecord{
+	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer terminalCancel()
+	if _, terminalDegraded, err := h.recordTerminalResult(terminalCtx, terminalRecord{
 		EventID:      terminalEventID,
 		TurnID:       turnID,
 		RequestID:    requestID,
@@ -505,13 +546,19 @@ func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannel
 		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
 	}
 
-	streamTee := adapter.NewStreamTee(resp.BodyStream, NewSSEWriter(c), h.db, h.memoryRoot, turnID, requestID, conversationID, sessionID, teamID)
+	streamTee := adapter.NewStreamTee(c.Request.Context(), resp.BodyStream, NewSSEWriter(c), h.db, h.memoryRoot, turnID, requestID, conversationID, sessionID, teamID)
 	terminalStatus, streamErr := streamTee.Stream()
 	errorMessage := ""
 	if streamErr != nil {
 		errorMessage = streamErr.Error()
 	}
-	terminalEventID, _, terminalErr := h.streamTerminalResult(c.Request.Context(), terminalRecord{
+	// The terminal event MUST be recorded even when the client disconnected:
+	// the request context is already cancelled at this point, so record with a
+	// fresh background context. Otherwise the terminal lands in the local
+	// buffer (or nowhere) and the turn stays a ghost with no final_status.
+	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer terminalCancel()
+	terminalEventID, _, terminalErr := h.streamTerminalResult(terminalCtx, terminalRecord{
 		EventID:      idgen.NewEventID(),
 		TurnID:       turnID,
 		RequestID:    requestID,
@@ -521,7 +568,14 @@ func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannel
 		Status:       terminalStatus,
 		ErrorMsg:     errorMessage,
 	})
-	if terminalErr == nil && terminalStatus == turn.StatusError {
+	if terminalErr != nil {
+		// The stream result is already settled; a recording failure must not
+		// retry the upstream. The watchdog missing_response pass closes the
+		// turn with a cancelled terminal if SQLite and the buffer both reject it.
+		log.Printf("record stream terminal: status=%s err=%v", terminalStatus, terminalErr)
+		return
+	}
+	if terminalStatus == turn.StatusError {
 		_ = turn.EnqueueOutbox(h.db, requestID, terminalEventID, map[string]string{
 			"turn_id": turnID,
 			"reason":  errorMessage,
@@ -675,7 +729,7 @@ func (h *GatewayHandler) getFailoverChannel(teamID, channelID string) (*Upstream
 	return &channel, nil
 }
 
-func (h *GatewayHandler) recordInjectionSnapshot(requestID, turnID string, pkg adapter.InjectionPackage, injectionText string) error {
+func (h *GatewayHandler) recordInjectionSnapshot(requestID, turnID string, pkg adapter.InjectionPackage, injectionText string, tokenBudget int) error {
 	sourceIDs, err := json.Marshal(pkg.SourceEventIDs)
 	if err != nil {
 		return fmt.Errorf("marshal injection sources: %w", err)
@@ -685,11 +739,138 @@ func (h *GatewayHandler) recordInjectionSnapshot(requestID, turnID string, pkg a
 		INSERT INTO injection_snapshots (
 			id, request_id, turn_id, manifest_version, source_ids_json, token_budget, used_tokens, truncated
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, idgen.NewID(), requestID, turnID, pkg.ManifestVersion, string(sourceIDs), 0, usedTokens, boolToInt(pkg.Truncated))
+	`, idgen.NewID(), requestID, turnID, pkg.ManifestVersion, string(sourceIDs), tokenBudget, usedTokens, boolToInt(pkg.Truncated))
 	if err != nil {
 		return fmt.Errorf("insert injection snapshot: %w", err)
 	}
 	return nil
+}
+
+// resolveSession derives the conversation's durable binding so the injection
+// subject (team/agent/identity card) matches the conversation that actually
+// made the request. A failed or missing binding degrades to an empty subject;
+// it must never block the LLM path (传话者协议 §录入不变量).
+func (h *GatewayHandler) resolveSession(c *gin.Context, conversationID, teamID, channelID string) (sessionID, agentID, identityCardID string) {
+	apiKeyID, ok := GetAPIKeyID(c)
+	if !ok {
+		return "", "", ""
+	}
+	resolved, err := binding.NewResolver(h.db).Resolve(c.Request.Context(), binding.ResolveRequest{
+		ConversationID:    conversationID,
+		APIKeyID:          apiKeyID,
+		TeamID:            teamID,
+		UpstreamChannelID: channelID,
+		BindingSource:     "service",
+	})
+	if err != nil {
+		log.Printf("session binding resolve degraded (conversation %s): %v", conversationID, err)
+		return "", "", ""
+	}
+	return resolved.SessionID, resolved.AgentID, resolved.IdentityCardID
+}
+
+// buildLLMInjection assembles the phase3 injection package for one LLM turn:
+// approved path manifest + active identity card + ACL-filtered retrieval with
+// token budget and L4→L3→L2→L1→L0 layer ordering. It returns the package and
+// its rendered text, or an error so the caller can degrade to a manifest-only
+// package instead of blocking the request.
+func (h *GatewayHandler) buildLLMInjection(ctx context.Context, teamID, agentID, identityCardID string, inbound *adapter.InboundTurn) (adapter.InjectionPackage, string, error) {
+	tokenBudget := h.tokenBudget
+	if tokenBudget <= 0 {
+		tokenBudget = defaultInjectionTokenBudget
+	}
+	teamDB, err := db.OpenTeamDB(h.teamsDir, teamID)
+	if err != nil {
+		return adapter.InjectionPackage{}, "", fmt.Errorf("open team db for retrieval: %w", err)
+	}
+	defer teamDB.Close()
+	if err := db.EnsureAssetsSchema(teamDB); err != nil {
+		return adapter.InjectionPackage{}, "", fmt.Errorf("ensure team asset schema: %w", err)
+	}
+	pkg, text, err := inject.Build(ctx, inject.Request{
+		GlobalDB:       h.db,
+		TeamDB:         teamDB,
+		MemoryRoot:     h.memoryRoot,
+		TeamID:         teamID,
+		AgentID:        agentID,
+		IdentityCardID: identityCardID,
+		Query:          extractInjectionQuery(inbound),
+		TokenBudget:    tokenBudget,
+		Limit:          defaultInjectionLimit,
+	})
+	if err != nil {
+		return adapter.InjectionPackage{}, "", err
+	}
+	return pkg, text, nil
+}
+
+// extractInjectionQuery returns the most recent user text from a normalized
+// inbound turn across all three protocols. It is used as the retrieval query
+// (V2.1: 每次请求前从记忆库检索并注入 source_ids).
+func extractInjectionQuery(inbound *adapter.InboundTurn) string {
+	if inbound == nil {
+		return ""
+	}
+	for i := len(inbound.Messages) - 1; i >= 0; i-- {
+		msg := inbound.Messages[i]
+		role := msg.Role
+		if role == "" {
+			var obj struct {
+				Role string `json:"role"`
+			}
+			if json.Unmarshal(msg.Content, &obj) == nil {
+				role = obj.Role
+			}
+		}
+		if role != "" && role != "user" {
+			continue
+		}
+		if text := userTextFromPayload(msg.Content); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// userTextFromPayload recursively extracts the last user text from a protocol
+// payload that may be a plain string, an object with a content field, or an
+// array of content blocks / message items (Anthropic blocks, chat content
+// arrays, Responses input items).
+func userTextFromPayload(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var obj struct {
+		Role    string          `json:"role"`
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		if obj.Text != "" {
+			if obj.Role == "" || obj.Role == "user" {
+				return obj.Text
+			}
+			return ""
+		}
+		if len(obj.Content) > 0 && string(obj.Content) != "null" {
+			return userTextFromPayload(obj.Content)
+		}
+		return ""
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(raw, &arr) == nil {
+		for i := len(arr) - 1; i >= 0; i-- {
+			if text := userTextFromPayload(arr[i]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func (h *GatewayHandler) registerEventFile(eventID, relativePath, contentHash string) error {

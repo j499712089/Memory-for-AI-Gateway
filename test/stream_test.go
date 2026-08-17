@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"gateway/internal/adapter"
+	"gateway/internal/idgen"
 	"gateway/internal/turn"
 	"gateway/internal/worker"
 )
@@ -100,6 +102,7 @@ func TestInterruptedStreamRecordsPartialTerminalAndCheckpoint(t *testing.T) {
 	}
 
 	stream := adapter.NewStreamTee(
+		context.Background(),
 		io.NopCloser(&chunkReader{chunks: [][]byte{[]byte("data: first\n\n"), []byte("data: second\n\n")}}),
 		&failAfterFirstWrite{},
 		gateway.db,
@@ -191,6 +194,7 @@ func TestInterruptedStreamContextCanceledRecordsPartial(t *testing.T) {
 	}
 
 	stream := adapter.NewStreamTee(
+		context.Background(),
 		io.NopCloser(&errorAfterChunks{
 			chunks: [][]byte{[]byte("data: first\n\n"), []byte("data: second\n\n")},
 			err:    context.Canceled,
@@ -232,6 +236,7 @@ func TestInterruptedStreamDeadlineExceededRecordsPartial(t *testing.T) {
 	}
 
 	stream := adapter.NewStreamTee(
+		context.Background(),
 		io.NopCloser(&errorAfterChunks{
 			chunks: [][]byte{[]byte("data: first\n\n")},
 			err:    context.DeadlineExceeded,
@@ -303,5 +308,238 @@ func TestOutboxDrainAcknowledgesRecordedTerminal(t *testing.T) {
 	}
 	if drainedAgain != 0 {
 		t.Fatalf("expected 0 drained rows on second sweep, got %d", drainedAgain)
+	}
+}
+
+// TestStreamCancelledBeforeAnyDataRecordsCancelled covers the active-cancel
+// path (ALL-84): a client aborts before a single response byte was delivered,
+// so the turn must end in a 'cancelled' terminal, never partial/error.
+func TestStreamCancelledBeforeAnyDataRecordsCancelled(t *testing.T) {
+	gateway := newPhase2Gateway(t, "http://127.0.0.1:1", "chat_completions", "default")
+	turnID := "turn-cancelled"
+	requestID := "req-cancelled"
+	conversationID := "conversation-cancelled"
+	if err := turn.WriteTurnLedger(gateway.db, turnID, requestID, conversationID, "", gateway.teamID, 1); err != nil {
+		t.Fatalf("write turn ledger: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // client went away before the upstream produced anything
+
+	stream := adapter.NewStreamTee(
+		ctx,
+		&closableBlockingReader{closed: make(chan struct{})},
+		alwaysOKWriter{},
+		gateway.db,
+		gateway.memoryRoot,
+		turnID,
+		requestID,
+		conversationID,
+		"",
+		gateway.teamID,
+	)
+	status, err := stream.Stream()
+	if err == nil || status != turn.StatusCancelled {
+		t.Fatalf("expected cancelled stream, got status=%s err=%v", status, err)
+	}
+	if err := turn.WriteTerminalStatus(gateway.db, turnID, requestID, conversationID, "", gateway.teamID, status, err.Error()); err != nil {
+		t.Fatalf("write cancelled terminal: %v", err)
+	}
+	if eventCount(t, gateway.db, requestID, "cancelled") != 1 {
+		t.Fatal("expected one cancelled terminal event")
+	}
+}
+
+// closableBlockingReader never produces data; Close unblocks the pending Read.
+// Stream() must not hang on it when the client context is cancelled — the grace
+// path classifies and returns, and the deferred upstream.Close() releases the
+// blocked read loop goroutine.
+type closableBlockingReader struct {
+	closed chan struct{}
+}
+
+func (r *closableBlockingReader) Read([]byte) (int, error) {
+	<-r.closed
+	return 0, io.EOF
+}
+
+func (r *closableBlockingReader) Close() error {
+	close(r.closed)
+	return nil
+}
+
+// TestStreamFullyDeliveredRecordsCompleteDespiteContextCancel covers the
+// "流已完整则为 complete" requirement (ALL-84): the upstream delivered the whole
+// stream (EOF reached) even though the client cancelled at the same moment, so
+// the terminal must be 'complete', not a spurious 'partial'.
+func TestStreamFullyDeliveredRecordsCompleteDespiteContextCancel(t *testing.T) {
+	gateway := newPhase2Gateway(t, "http://127.0.0.1:1", "chat_completions", "default")
+	turnID := "turn-complete-despite-cancel"
+	requestID := "req-complete-despite-cancel"
+	conversationID := "conversation-complete-despite-cancel"
+	if err := turn.WriteTurnLedger(gateway.db, turnID, requestID, conversationID, "", gateway.teamID, 1); err != nil {
+		t.Fatalf("write turn ledger: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the stream starts, but the data is already buffered
+
+	stream := adapter.NewStreamTee(
+		ctx,
+		io.NopCloser(&chunkReader{chunks: [][]byte{[]byte("data: full\n\n")}}),
+		alwaysOKWriter{},
+		gateway.db,
+		gateway.memoryRoot,
+		turnID,
+		requestID,
+		conversationID,
+		"",
+		gateway.teamID,
+	)
+	status, err := stream.Stream()
+	if err != nil || status != turn.StatusComplete {
+		t.Fatalf("expected complete stream, got status=%s err=%v", status, err)
+	}
+	if err := turn.WriteTerminalStatus(gateway.db, turnID, requestID, conversationID, "", gateway.teamID, status, ""); err != nil {
+		t.Fatalf("write complete terminal: %v", err)
+	}
+	if eventCount(t, gateway.db, requestID, "complete") != 1 {
+		t.Fatal("expected one complete terminal event")
+	}
+}
+
+// TestWriteTerminalStatusSupersedesCancelledPlaceholder verifies the idempotent
+// continuation ("幂等续写"): a placeholder 'cancelled' written for a turn that
+// was still streaming is superseded in place by the real terminal when it
+// arrives, keeping exactly one terminal event (V5.7).
+func TestWriteTerminalStatusSupersedesCancelledPlaceholder(t *testing.T) {
+	gateway := newPhase2Gateway(t, "http://127.0.0.1:1", "chat_completions", "default")
+	turnID := "turn-supersede"
+	requestID := "req-supersede"
+	conversationID := "conversation-supersede"
+	if err := turn.WriteTurnLedger(gateway.db, turnID, requestID, conversationID, "", gateway.teamID, 1); err != nil {
+		t.Fatalf("write turn ledger: %v", err)
+	}
+
+	cancelledEventID, err := turn.WriteTerminalStatusWithID(gateway.db, idgen.NewEventID(), turnID, requestID, conversationID, "", gateway.teamID, turn.StatusCancelled, "watchdog")
+	if err != nil {
+		t.Fatalf("write cancelled placeholder: %v", err)
+	}
+
+	// The real terminal arrives later: must supersede the placeholder.
+	returnedEventID, err := turn.WriteTerminalStatusWithID(gateway.db, idgen.NewEventID(), turnID, requestID, conversationID, "", gateway.teamID, turn.StatusComplete, "")
+	if err != nil {
+		t.Fatalf("write complete terminal after cancelled: %v", err)
+	}
+	if returnedEventID != cancelledEventID {
+		t.Fatalf("expected supersede to return the existing event id, got %q want %q", returnedEventID, cancelledEventID)
+	}
+
+	var finalStatus, finalEventID string
+	if err := gateway.db.QueryRow(`SELECT COALESCE(final_status,''), COALESCE(final_event_id,'') FROM turn_ledger WHERE turn_id = ?`, turnID).Scan(&finalStatus, &finalEventID); err != nil {
+		t.Fatalf("query ledger: %v", err)
+	}
+	if finalStatus != string(turn.StatusComplete) {
+		t.Fatalf("expected final_status complete, got %q", finalStatus)
+	}
+	if finalEventID != cancelledEventID {
+		t.Fatalf("expected final_event_id unchanged, got %q want %q", finalEventID, cancelledEventID)
+	}
+	var eventType, status string
+	if err := gateway.db.QueryRow(`SELECT event_type, status FROM turn_events WHERE id = ?`, cancelledEventID).Scan(&eventType, &status); err != nil {
+		t.Fatalf("query terminal event: %v", err)
+	}
+	if eventType != string(turn.StatusComplete) || status != "ok" {
+		t.Fatalf("expected event superseded to complete/ok, got %s/%s", eventType, status)
+	}
+	if eventCount(t, gateway.db, requestID, "cancelled") != 0 {
+		t.Fatal("expected no remaining cancelled event")
+	}
+	if eventCount(t, gateway.db, requestID, "complete") != 1 {
+		t.Fatal("expected exactly one complete terminal event")
+	}
+}
+
+// TestWriteTerminalStatusIdempotentNoOp verifies that a duplicate write after a
+// real terminal is a no-op returning the existing id, not an error.
+func TestWriteTerminalStatusIdempotentNoOp(t *testing.T) {
+	gateway := newPhase2Gateway(t, "http://127.0.0.1:1", "chat_completions", "default")
+	turnID := "turn-noop"
+	requestID := "req-noop"
+	conversationID := "conversation-noop"
+	if err := turn.WriteTurnLedger(gateway.db, turnID, requestID, conversationID, "", gateway.teamID, 1); err != nil {
+		t.Fatalf("write turn ledger: %v", err)
+	}
+	firstID, err := turn.WriteTerminalStatusWithID(gateway.db, idgen.NewEventID(), turnID, requestID, conversationID, "", gateway.teamID, turn.StatusPartial, "first")
+	if err != nil {
+		t.Fatalf("write partial terminal: %v", err)
+	}
+	secondID, err := turn.WriteTerminalStatusWithID(gateway.db, idgen.NewEventID(), turnID, requestID, conversationID, "", gateway.teamID, turn.StatusError, "second")
+	if err != nil {
+		t.Fatalf("duplicate write must be a no-op, got error: %v", err)
+	}
+	if secondID != firstID {
+		t.Fatalf("expected no-op to return existing id %q, got %q", firstID, secondID)
+	}
+	if eventCount(t, gateway.db, requestID, "partial") != 1 {
+		t.Fatal("expected exactly one terminal event")
+	}
+}
+
+// TestHandleMissingResponseClosesGhostTurn verifies the watchdog consumer
+// (ALL-84): an open turn with no terminal event gets closed with a 'cancelled'
+// terminal, and an already-terminal turn is a no-op.
+func TestHandleMissingResponseClosesGhostTurn(t *testing.T) {
+	gateway := newPhase2Gateway(t, "http://127.0.0.1:1", "chat_completions", "default")
+
+	ghostTurn := "turn-ghost"
+	ghostRequest := "req-ghost"
+	if err := turn.WriteTurnLedger(gateway.db, ghostTurn, ghostRequest, "conv-ghost", "", gateway.teamID, 1); err != nil {
+		t.Fatalf("write ghost ledger: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"turn_id":         ghostTurn,
+		"request_id":      ghostRequest,
+		"conversation_id": "conv-ghost",
+		"session_id":      "",
+	})
+	claim := &worker.Claim{TeamID: gateway.teamID, PayloadJSON: string(payload)}
+	if err := worker.HandleMissingResponse(context.Background(), gateway.db, claim); err != nil {
+		t.Fatalf("handle missing response: %v", err)
+	}
+	var finalStatus string
+	if err := gateway.db.QueryRow(`SELECT COALESCE(final_status,'') FROM turn_ledger WHERE turn_id = ?`, ghostTurn).Scan(&finalStatus); err != nil {
+		t.Fatalf("query ghost ledger: %v", err)
+	}
+	if finalStatus != string(turn.StatusCancelled) {
+		t.Fatalf("expected ghost turn closed with cancelled, got %q", finalStatus)
+	}
+	if eventCount(t, gateway.db, ghostRequest, "cancelled") != 1 {
+		t.Fatal("expected one cancelled terminal for the ghost turn")
+	}
+
+	// A second run must be a no-op (idempotent).
+	if err := worker.HandleMissingResponse(context.Background(), gateway.db, claim); err != nil {
+		t.Fatalf("second handle missing response: %v", err)
+	}
+	if eventCount(t, gateway.db, ghostRequest, "cancelled") != 1 {
+		t.Fatal("expected still exactly one cancelled terminal")
+	}
+
+	// A turn that already has a real terminal is left untouched.
+	doneTurn := "turn-done"
+	doneRequest := "req-done"
+	if err := turn.WriteTurnLedger(gateway.db, doneTurn, doneRequest, "conv-done", "", gateway.teamID, 1); err != nil {
+		t.Fatalf("write done ledger: %v", err)
+	}
+	if _, err := turn.WriteTerminalStatusWithID(gateway.db, idgen.NewEventID(), doneTurn, doneRequest, "conv-done", "", gateway.teamID, turn.StatusComplete, ""); err != nil {
+		t.Fatalf("write complete terminal: %v", err)
+	}
+	donePayload, _ := json.Marshal(map[string]string{"turn_id": doneTurn, "request_id": doneRequest})
+	if err := worker.HandleMissingResponse(context.Background(), gateway.db, &worker.Claim{TeamID: gateway.teamID, PayloadJSON: string(donePayload)}); err != nil {
+		t.Fatalf("handle missing response on done turn: %v", err)
+	}
+	if eventCount(t, gateway.db, doneRequest, "cancelled") != 0 {
+		t.Fatal("done turn must not gain a cancelled terminal")
 	}
 }

@@ -19,6 +19,7 @@ import (
 // StreamTee intercepts SSE responses byte-by-byte
 // Passes through to client while buffering for checkpoints
 type StreamTee struct {
+	ctx            context.Context
 	upstream       io.ReadCloser
 	downstream     io.Writer
 	db             *sql.DB
@@ -36,16 +37,31 @@ type StreamTee struct {
 	checkpointSeq  int
 	totalBytes     int64
 	disconnected   bool
+	complete       bool
 }
 
-// NewStreamTee creates a new stream tee
+// disconnectGracePeriod is how long Stream() waits for the upstream read loop
+// to drain remaining bytes and reach EOF after the client cancels the request
+// context. Clients routinely close the connection right after the protocol
+// terminal marker; without the grace window a fully delivered stream would be
+// misclassified as partial because context cancellation surfaces before EOF.
+const disconnectGracePeriod = 500 * time.Millisecond
+
+// NewStreamTee creates a new stream tee. ctx is the client request context:
+// its cancellation marks a client disconnect/abort and drives the partial /
+// cancelled terminal classification.
 func NewStreamTee(
+	ctx context.Context,
 	upstream io.ReadCloser,
 	downstream io.Writer,
 	db *sql.DB,
 	memoryRoot, turnID, requestID, conversationID, sessionID, teamID string,
 ) *StreamTee {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &StreamTee{
+		ctx:            ctx,
 		upstream:       upstream,
 		downstream:     downstream,
 		db:             db,
@@ -105,6 +121,9 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 
 			if err != nil {
 				if err == io.EOF {
+					st.mu.Lock()
+					st.complete = true
+					st.mu.Unlock()
 					done <- nil
 					return
 				}
@@ -119,24 +138,26 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 		select {
 		case err := <-done:
 			// Stream finished
-			// Write final checkpoint if buffer has data
-			if st.hasBufferedData() {
-				st.writeCheckpoint()
-			}
+			return st.finalize(err)
 
-			if err != nil {
-				// A client disconnect cancels the request context, which cancels
-				// the upstream request; the upstream read then surfaces
-				// context.Canceled / context.DeadlineExceeded. That is a stream
-				// interruption, not an upstream protocol error (those are observed
-				// before the stream is established), so record a partial terminal
-				// instead of an error that would enqueue a spurious outbox retry.
-				if st.isDisconnected() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return turn.StatusPartial, err
-				}
-				return turn.StatusError, err
+		case <-st.ctx.Done():
+			// Client cancelled or disconnected. The upstream may have already
+			// delivered the full stream (clients often close the connection
+			// right after the protocol terminal marker), so give the read loop
+			// a short grace period to drain the remaining bytes and reach EOF.
+			// A fully delivered stream then records 'complete' instead of a
+			// spurious 'partial' — the terminal classification must depend on
+			// whether the stream actually finished, not on which of
+			// context-cancellation / downstream-write-failure surfaces first.
+			select {
+			case err := <-done:
+				return st.finalize(err)
+			case <-time.After(disconnectGracePeriod):
+				// The read loop is still blocked on the upstream: record the
+				// interruption now. The deferred upstream.Close() unblocks the
+				// reader; its error is discarded (buffered channel).
+				return st.finalize(st.ctx.Err())
 			}
-			return turn.StatusComplete, nil
 
 		case <-ticker.C:
 			// Time-based checkpoint (1 second)
@@ -147,6 +168,47 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 			}
 		}
 	}
+}
+
+// finalize flushes any buffered data into a checkpoint and decides the stable
+// terminal status. The decision is deterministic:
+//   - the stream reached EOF (fully delivered)          -> complete
+//   - the client is gone (context cancelled / write fail) and the stream did
+//     not finish; some bytes were delivered              -> partial
+//   - the client is gone and nothing was delivered       -> cancelled
+//   - any other upstream error                           -> error
+func (st *StreamTee) finalize(err error) (turn.TerminalStatus, error) {
+	if st.hasBufferedData() {
+		if cpErr := st.writeCheckpoint(); cpErr != nil {
+			fmt.Printf("checkpoint error: %v\n", cpErr)
+		}
+	}
+
+	st.mu.Lock()
+	complete := st.complete
+	total := st.totalBytes
+	disconnected := st.disconnected
+	st.mu.Unlock()
+
+	if err == nil || complete {
+		return turn.StatusComplete, nil
+	}
+
+	// The client is gone when the request context is cancelled, a downstream
+	// write failed, or the upstream read surfaced a cancellation error (the
+	// last one keeps callers that pass a non-cancelled context working).
+	clientGone := disconnected ||
+		(st.ctx != nil && st.ctx.Err() != nil) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
+	if clientGone {
+		if total == 0 {
+			return turn.StatusCancelled, err
+		}
+		return turn.StatusPartial, err
+	}
+
+	return turn.StatusError, err
 }
 
 // writeCheckpoint writes buffered deltas to checkpoint file and database
@@ -223,10 +285,4 @@ func (st *StreamTee) restoreBufferedData(data []byte) {
 	st.buffer.Reset()
 	st.buffer.Write(data)
 	st.buffer.Write(current)
-}
-
-func (st *StreamTee) isDisconnected() bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.disconnected
 }

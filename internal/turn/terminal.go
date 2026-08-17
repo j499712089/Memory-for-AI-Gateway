@@ -29,6 +29,13 @@ func WriteTerminalStatus(db *sql.DB, turnID, requestID, conversationID, sessionI
 
 // WriteTerminalStatusWithID records the only terminal event for a turn and
 // returns its ID for outbox and L0 file bookkeeping.
+//
+// The write is idempotent ("幂等续写"): the first real terminal wins. A
+// placeholder 'cancelled' written by the watchdog missing_response pass (or by
+// the active-cancel path before any bytes flowed) is superseded in place when
+// the real terminal (complete/partial/error) later arrives, so a slow stream
+// that was prematurely flagged as cancelled still records its true outcome.
+// Any other duplicate write is a no-op that returns the existing terminal id.
 func WriteTerminalStatusWithID(db *sql.DB, eventID, turnID, requestID, conversationID, sessionID, teamID string, status TerminalStatus, errorMsg string) (string, error) {
 	if status != StatusComplete && status != StatusPartial && status != StatusError && status != StatusCancelled {
 		return "", fmt.Errorf("unsupported terminal status: %s", status)
@@ -44,17 +51,53 @@ func WriteTerminalStatusWithID(db *sql.DB, eventID, turnID, requestID, conversat
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
+	terminalEventID := eventID
 	err = withImmediateTx(db, func(ctx context.Context, conn *sql.Conn) error {
-		var existingStatus sql.NullString
-		err := conn.QueryRowContext(ctx, `SELECT final_status FROM turn_ledger WHERE turn_id = ?`, turnID).Scan(&existingStatus)
+		var existingEventID, existingStatus string
+		err := conn.QueryRowContext(ctx, `SELECT COALESCE(final_event_id,''), COALESCE(final_status,'') FROM turn_ledger WHERE turn_id = ?`, turnID).Scan(&existingEventID, &existingStatus)
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("turn ledger not found")
 		}
 		if err != nil {
 			return fmt.Errorf("check existing terminal status: %w", err)
 		}
-		if existingStatus.Valid && existingStatus.String != "" {
-			return fmt.Errorf("turn already has terminal status: %s", existingStatus.String)
+
+		if existingStatus != "" {
+			if existingStatus == string(StatusCancelled) && status != StatusCancelled {
+				// The watchdog/active-cancel placeholder must yield to the real
+				// terminal. Update the existing event row in place so the turn
+				// keeps exactly one terminal event (V5.7), and flip the ledger
+				// to the real status.
+				eventState := "ok"
+				if status == StatusError {
+					eventState = "error"
+				}
+				if _, err := conn.ExecContext(ctx, `
+					UPDATE turn_events
+					SET event_type = ?, status = ?, metadata_json = ?
+					WHERE id = ?
+				`, string(status), eventState, string(metadataJSON), existingEventID); err != nil {
+					return fmt.Errorf("supersede cancelled terminal: %w", err)
+				}
+				result, err := conn.ExecContext(ctx, `
+					UPDATE turn_ledger
+					SET final_status = ?, completed_at = ?
+					WHERE turn_id = ?
+				`, string(status), now, turnID)
+				if err != nil {
+					return fmt.Errorf("update turn ledger on supersede: %w", err)
+				}
+				if rows, err := result.RowsAffected(); err != nil {
+					return fmt.Errorf("check supersede update: %w", err)
+				} else if rows != 1 {
+					return fmt.Errorf("turn ledger lost on supersede")
+				}
+			}
+			// Idempotent no-op: the turn already has a final terminal. Return
+			// the existing terminal event id so downstream bookkeeping attaches
+			// to the event that is actually recorded.
+			terminalEventID = existingEventID
+			return nil
 		}
 
 		var sequence int
@@ -103,7 +146,7 @@ func WriteTerminalStatusWithID(db *sql.DB, eventID, turnID, requestID, conversat
 	if err != nil {
 		return "", err
 	}
-	return eventID, nil
+	return terminalEventID, nil
 }
 
 // SetTurnResponse records the response L0 reference for replay and idempotency.
