@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
+
+	"gateway/internal/paths"
 )
 
 // RegisterEventFile registers an event file in the event_files ledger
@@ -84,7 +85,10 @@ func ScanInconsistentFiles(db *sql.DB, memoryRoot string) ([]string, error) {
 			return nil, fmt.Errorf("scan row: %w", err)
 		}
 
-		fullPath := filepath.Join(memoryRoot, filePath)
+		fullPath, pathErr := paths.SafeJoin(memoryRoot, filePath)
+		if pathErr != nil {
+			return nil, fmt.Errorf("unsafe event file path %q: %w", filePath, pathErr)
+		}
 		matches, err := VerifyFileHash(fullPath, fileHash)
 		if err != nil {
 			return nil, fmt.Errorf("verify hash for %s: %w", filePath, err)

@@ -56,9 +56,9 @@ type TurnStreamEvent struct {
 
 // InjectionPackage represents memory injection content
 type InjectionPackage struct {
-	PathManifest    string   // Fixed path list placeholder (Phase 2)
+	PathManifest    string   // Approved path manifest
 	IdentityCard    string   // Identity card summary
-	RetrievalSnips  []string // Retrieved snippets (Phase 3)
+	RetrievalSnips  []string // Retrieved snippets
 	SourceEventIDs  []string // Traceability
 	ManifestVersion string
 	Truncated       bool // Set if token budget exceeded

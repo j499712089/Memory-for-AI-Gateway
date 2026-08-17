@@ -14,6 +14,7 @@ import (
 	"gateway/internal/hashutil"
 	"gateway/internal/idgen"
 	"gateway/internal/l0"
+	"gateway/internal/paths"
 	"gateway/internal/turn"
 )
 
@@ -161,7 +162,10 @@ func readBufferPayload(memoryRoot string, record db.BufferRecord) (db.BufferEven
 	if record.FilePath == "" {
 		return payload, fmt.Errorf("buffered record has no file path")
 	}
-	fullPath := filepath.Join(memoryRoot, filepath.FromSlash(record.FilePath))
+	fullPath, pathErr := paths.SafeJoin(memoryRoot, filepath.FromSlash(record.FilePath))
+	if pathErr != nil {
+		return payload, fmt.Errorf("unsafe buffered event path: %w", pathErr)
+	}
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		return payload, fmt.Errorf("read buffered event: %w", err)
@@ -207,8 +211,10 @@ func replayInboundEvent(ctx context.Context, database *sql.DB, memoryRoot string
 	if _, err := turn.WriteInboundEventWithID(database, payload.EventID, payload.TurnID, payload.RequestID, payload.ConversationID, payload.SessionID, payload.TeamID, contentHash, l0Path); err != nil {
 		return fmt.Errorf("replay inbound event: %w", err)
 	}
-	if info, err := os.Stat(filepath.Join(memoryRoot, l0Path)); err == nil {
-		_ = l0.RegisterEventFile(database, payload.EventID, l0Path, info.Size(), contentHash)
+	if fullPath, pathErr := paths.SafeJoin(memoryRoot, l0Path); pathErr == nil {
+		if info, err := os.Stat(fullPath); err == nil {
+			_ = l0.RegisterEventFile(database, payload.EventID, l0Path, info.Size(), contentHash)
+		}
 	}
 	replayInjectionSnapshot(ctx, database, payload)
 	return nil

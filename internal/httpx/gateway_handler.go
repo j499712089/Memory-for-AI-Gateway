@@ -22,6 +22,7 @@ import (
 	"gateway/internal/idgen"
 	"gateway/internal/inject"
 	"gateway/internal/l0"
+	"gateway/internal/paths"
 	"gateway/internal/secrets"
 	"gateway/internal/turn"
 	"gateway/internal/worker"
@@ -192,7 +193,10 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 	injectionPkg, injectionText, err := h.buildLLMInjection(c.Request.Context(), teamID, agentID, identityCardID, inbound)
 	if err != nil {
 		log.Printf("injection build degraded (request %s): %v", requestID, err)
-		injectionPkg = adapter.InjectionPackage{ManifestVersion: inject.ManifestVersion}
+		// Retrieval may be temporarily unavailable, but the upstream request
+		// must still carry the approved manifest and binding identity rather
+		// than the retired Phase 2 path list or an empty package.
+		injectionPkg = adapter.BuildInjectionPackage(teamID, agentID, identityCardID)
 		injectionText = inject.Render(injectionPkg)
 	}
 	injectedBody, err := buildInjectedRequest(protocol, body, injectionText)
@@ -874,7 +878,11 @@ func userTextFromPayload(raw json.RawMessage) string {
 }
 
 func (h *GatewayHandler) registerEventFile(eventID, relativePath, contentHash string) error {
-	fileInfo, err := os.Stat(filepath.Join(h.memoryRoot, relativePath))
+	abs, pathErr := paths.SafeJoin(h.memoryRoot, relativePath)
+	if pathErr != nil {
+		return fmt.Errorf("unsafe L0 file path: %w", pathErr)
+	}
+	fileInfo, err := os.Stat(abs)
 	if err != nil {
 		return fmt.Errorf("stat L0 file: %w", err)
 	}
@@ -927,7 +935,11 @@ func (h *GatewayHandler) checkIdempotency(key, requestHash string) (idempotencyS
 		return idempotencyConflict, requestID, nil, nil
 	}
 	if finalStatus.Valid && finalStatus.String == string(turn.StatusComplete) && responsePath.Valid && responsePath.String != "" {
-		cachedResponse, err := os.ReadFile(filepath.Join(h.memoryRoot, responsePath.String))
+		cachedPath, pathErr := paths.SafeJoin(h.memoryRoot, responsePath.String)
+		if pathErr != nil {
+			return idempotencyNew, "", nil, fmt.Errorf("unsafe idempotent response path: %w", pathErr)
+		}
+		cachedResponse, err := os.ReadFile(cachedPath)
 		if err != nil {
 			return idempotencyNew, "", nil, fmt.Errorf("read idempotent response: %w", err)
 		}

@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	"gateway/internal/adapter"
+	"gateway/internal/paths"
 	"gateway/internal/retrieval"
 )
 
-const ManifestVersion = "phase3-v1"
+const ManifestVersion = adapter.ManifestVersion
 
 type Request struct {
 	GlobalDB       *sql.DB
@@ -74,7 +75,10 @@ func readManifest(memoryRoot string) (string, error) {
 	if strings.TrimSpace(memoryRoot) == "" {
 		return "", fmt.Errorf("memory root is required")
 	}
-	path := filepath.Join(memoryRoot, "00_系统", "路径注入清单.md")
+	path, err := paths.SafeJoin(memoryRoot, filepath.Join("00_系统", "路径注入清单.md"))
+	if err != nil {
+		return "", fmt.Errorf("path manifest outside memory root: %w", err)
+	}
 	content, err := os.ReadFile(path)
 	if err == nil {
 		return string(content), nil
@@ -82,7 +86,7 @@ func readManifest(memoryRoot string) (string, error) {
 	if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read path manifest: %w", err)
 	}
-	return "## Memory Context Paths\n- L0_原始记录/\n- L1_任务纪要/\n- L2_知识经验/\n- L3_团队身份/\n- L4_长期准则/", nil
+	return adapter.DefaultPathManifest, nil
 }
 
 func loadIdentityCard(ctx context.Context, database *sql.DB, teamID, identityCardID string) (string, error) {
@@ -119,6 +123,9 @@ func Render(pkg adapter.InjectionPackage) string {
 	}
 	if len(pkg.RetrievalSnips) > 0 {
 		parts = append(parts, "## Retrieved Context\n"+strings.Join(pkg.RetrievalSnips, "\n"))
+	}
+	if pkg.ManifestVersion == "" {
+		pkg.ManifestVersion = ManifestVersion
 	}
 	parts = append(parts, "<!-- source_ids: ["+strings.Join(pkg.SourceEventIDs, ",")+"] -->")
 	parts = append(parts, "<!-- manifest_version: "+pkg.ManifestVersion+" -->")

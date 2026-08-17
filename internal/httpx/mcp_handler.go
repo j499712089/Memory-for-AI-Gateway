@@ -18,6 +18,7 @@ import (
 	"gateway/internal/acl"
 	"gateway/internal/db"
 	"gateway/internal/idgen"
+	"gateway/internal/paths"
 	"gateway/internal/retrieval"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,34 @@ func errorResponse(c *gin.Context, status int, errType, message string) {
 		requestID = idgen.NewID()
 	}
 	c.JSON(status, gin.H{"error": gin.H{"type": errType, "message": message, "request_id": requestID}})
+}
+
+// auditPathViolation records rejected DB-controlled file paths without
+// allowing a cancelled HTTP request to interrupt the audit write. Auditing is
+// best effort because a path rejection must still return a deterministic 403
+// when the global database is unavailable.
+func (h *MCPHandler) auditPathViolation(c *gin.Context, requestedPath string, pathErr error) {
+	if h == nil || h.globalDB == nil {
+		return
+	}
+	requestID, _ := GetIdempotencyKey(c)
+	actorID, _ := GetAPIKeyID(c)
+	failure := "path is outside the memory root"
+	if pathErr != nil {
+		failure = pathErr.Error()
+	}
+	_, _ = h.globalDB.ExecContext(context.WithoutCancel(c.Request.Context()), `
+		INSERT INTO audit_log
+			(id, request_id, actor_type, actor_id, action, target_type, target_id, result, failure)
+		VALUES (?, ?, 'system', ?, 'path_access_denied', 'memory_path', ?, 'denied', ?)
+	`, idgen.NewID(), nullableAudit(requestID), nullableAudit(actorID), requestedPath, failure)
+}
+
+func nullableAudit(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // resolveTeam derives the effective team from the authenticated key and the
@@ -240,7 +269,12 @@ func (h *MCPHandler) HandleMemoryGet(c *gin.Context) {
 
 	body := ""
 	if asset.BodyPath != "" {
-		abs := filepath.Join(h.memoryRoot, asset.BodyPath)
+		abs, pathErr := paths.SafeJoin(h.memoryRoot, asset.BodyPath)
+		if pathErr != nil {
+			h.auditPathViolation(c, asset.BodyPath, pathErr)
+			errorResponse(c, http.StatusForbidden, "path_not_allowed", "asset body path is outside the memory root")
+			return
+		}
 		if data, readErr := os.ReadFile(abs); readErr == nil {
 			body = string(data)
 		}
