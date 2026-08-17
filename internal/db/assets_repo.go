@@ -1156,7 +1156,9 @@ type GitBatch struct {
 	Error     string
 }
 
-// CreateGitBatch inserts a pending git batch.
+// CreateGitBatch inserts a pending git batch. It is idempotent: a retried
+// git_commit job reuses the batch row created by its first attempt instead of
+// tripping the primary key.
 func CreateGitBatch(ctx context.Context, database *sql.DB, batch GitBatch) error {
 	if batch.ID == "" {
 		batch.ID = "batch-" + time.Now().UTC().Format("20060102150405") + "-" + fmt.Sprint(time.Now().UnixNano())
@@ -1165,7 +1167,7 @@ func CreateGitBatch(ctx context.Context, database *sql.DB, batch GitBatch) error
 		batch.Status = "pending"
 	}
 	filesJSON, _ := json.Marshal(batch.Files)
-	_, err := database.ExecContext(ctx, `INSERT INTO git_batches (id, status, files_json, message, created_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	_, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO git_batches (id, status, files_json, message, created_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		batch.ID, batch.Status, string(filesJSON), nullable(batch.Message))
 	return err
 }

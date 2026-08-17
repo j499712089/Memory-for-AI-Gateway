@@ -144,7 +144,13 @@ func (q *Queue) Enqueue(ctx context.Context, job Job) (string, error) {
 	return job.ID, nil
 }
 
-func (q *Queue) Claim(ctx context.Context, workerID string) (*Claim, error) {
+// Claim atomically selects the highest-priority due job and leases it to
+// workerID. When queues is non-empty, only jobs in those queues are eligible;
+// an empty allow-list selects any job. The queue filter lets a worker process
+// claim only the job types it has handlers for, so compensation / replay /
+// missing-response jobs the worker cannot execute stay pending instead of
+// being dead-lettered.
+func (q *Queue) Claim(ctx context.Context, workerID string, queues ...string) (*Claim, error) {
 	if q == nil || q.database == nil {
 		return nil, fmt.Errorf("worker queue is nil")
 	}
@@ -169,7 +175,17 @@ func (q *Queue) Claim(ctx context.Context, workerID string) (*Claim, error) {
 		}
 	}()
 	now := q.now().UTC()
-	rows, err := conn.QueryContext(ctx, `SELECT j.id, j.queue, j.priority, COALESCE(j.team_id,''), COALESCE(j.agent_id,''), COALESCE(j.asset_id,''), COALESCE(j.asset_type,''), j.payload_json, j.partition_key, j.retry_count, j.max_retries FROM jobs j WHERE j.status = 'pending' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?) AND NOT EXISTS (SELECT 1 FROM jobs active WHERE active.status = 'processing' AND active.partition_key = j.partition_key) ORDER BY j.priority DESC, j.created_at ASC, j.id ASC`, now.Format(time.RFC3339Nano))
+	args := []any{now.Format(time.RFC3339Nano)}
+	queueFilter := ""
+	if len(queues) > 0 {
+		placeholders := make([]string, len(queues))
+		for index, name := range queues {
+			placeholders[index] = "?"
+			args = append(args, name)
+		}
+		queueFilter = " AND j.queue IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT j.id, j.queue, j.priority, COALESCE(j.team_id,''), COALESCE(j.agent_id,''), COALESCE(j.asset_id,''), COALESCE(j.asset_type,''), j.payload_json, j.partition_key, j.retry_count, j.max_retries FROM jobs j WHERE j.status = 'pending' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?) AND NOT EXISTS (SELECT 1 FROM jobs active WHERE active.status = 'processing' AND active.partition_key = j.partition_key)`+queueFilter+` ORDER BY j.priority DESC, j.created_at ASC, j.id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}

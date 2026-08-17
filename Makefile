@@ -1,10 +1,16 @@
-.PHONY: build run test clean
+.PHONY: build worker run test clean
 
 build:
 	go build -o gateway.exe cmd/gateway/main.go
 
+worker:
+	go build -o worker.exe cmd/worker/main.go
+
 run: build
 	./gateway.exe
+
+run-worker: worker
+	./worker.exe
 
 test:
 	go test -v ./...

@@ -214,9 +214,33 @@ func registerPromote(processor *Processor, deps AssetWorkerDeps) {
 			return err
 		}
 		_, err = WriteAssetMarkdown(writer, payload.Layer, payload.Slug, payload.Name, payload.Summary, payload.SourceEventIDs)
-		return err
+		if err != nil {
+			return err
+		}
+		// A successful promotion just wrote vault files: queue a batch commit
+		// so the promoted memory is persisted to git (unless one is already
+		// pending). Skipped entirely when no vault path is configured.
+		return enqueuePromotionGitCommit(ctx, processor.Queue, deps, payload.TeamID)
 	}
 	processor.Register("l2_promote", handler)
 	processor.Register("l3_promote", handler)
 	processor.Register("l4_promote", handler)
+}
+
+// enqueuePromotionGitCommit queues a git_commit job after an asset promotion
+// wrote vault files, unless one is already queued or being processed. It is a
+// best-effort trigger: without a vault path the promotion simply skips it.
+func enqueuePromotionGitCommit(ctx context.Context, queue *Queue, deps AssetWorkerDeps, teamID string) error {
+	if queue == nil || deps.VaultPath == "" {
+		return nil
+	}
+	pending, err := HasPendingGitCommit(ctx, deps.GlobalDB)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return nil
+	}
+	_, err = EnqueueGitCommit(ctx, queue, GitCommitPayload{TeamID: teamID, Reason: "post-promotion batch commit"})
+	return err
 }
