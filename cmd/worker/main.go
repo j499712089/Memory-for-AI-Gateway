@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -72,6 +73,27 @@ func main() {
 		VaultPath:  memoryRoot,
 	}); err != nil {
 		log.Fatalf("Failed to register asset workers: %v", err)
+	}
+
+	// buffer_replay: replays events that the gateway durably buffered under
+	// `90_运行数据/本地持久化缓冲` when SQLite was busy (ALL-81). The gateway
+	// enqueues one of these per degraded write; without a handler the job would
+	// sit pending forever and the event would only ever exist as a buffer file.
+	processor.Register("buffer_replay", func(ctx context.Context, claim *worker.Claim) error {
+		var payload struct {
+			BufferID string `json:"buffer_id"`
+		}
+		if err := json.Unmarshal([]byte(claim.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("buffer_replay payload: %w", err)
+		}
+		return worker.ReplayBufferByID(ctx, database.Global, memoryRoot, payload.BufferID)
+	})
+
+	// missing_response: the watchdog enqueues one of these for every open turn
+	// that never received a terminal event. The handler closes the ghost turn
+	// with a 'cancelled' terminal (ALL-84) so per-turn terminal audits converge.
+	if err := worker.RegisterMissingResponse(processor, database.Global); err != nil {
+		log.Fatalf("Failed to register missing_response handler: %v", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -248,5 +249,50 @@ func replayTerminalEvent(ctx context.Context, database *sql.DB, payload db.Buffe
 	if payload.ContentHash != "" && payload.ContentPath != "" {
 		_ = turn.SetEventContent(database, payload.EventID, payload.ContentHash, payload.ContentPath)
 	}
+	return nil
+}
+
+// ReplayPendingBuffers drains every pending local_buffer row back into SQLite
+// and returns how many rows were replayed. It is the periodic counterpart of
+// the startup recovery pass: the gateway calls it on its maintenance loop so a
+// degraded write heals even when no dedicated worker process is running.
+func ReplayPendingBuffers(ctx context.Context, database *sql.DB, memoryRoot string) (int, error) {
+	if database == nil {
+		return 0, fmt.Errorf("buffer replay database is nil")
+	}
+	if memoryRoot == "" {
+		return 0, fmt.Errorf("buffer replay memory root is empty")
+	}
+	return db.ReplayBuffers(ctx, database, memoryRoot, func(ctx context.Context, record db.BufferRecord) error {
+		return ReplayBufferEvent(ctx, database, memoryRoot, record)
+	})
+}
+
+// ReplayBufferByID replays one buffered event identified by its local_buffer
+// id and moves the row to 'replayed' on success (or 'failed' with an
+// incremented retry count on error). It is the body of the buffer_replay
+// compensation job. A row that vanished is a no-op: some other pass already
+// replayed it.
+func ReplayBufferByID(ctx context.Context, database *sql.DB, memoryRoot, bufferID string) error {
+	if database == nil {
+		return fmt.Errorf("buffer replay database is nil")
+	}
+	if bufferID == "" {
+		return fmt.Errorf("buffer id is required")
+	}
+	var record db.BufferRecord
+	err := database.QueryRowContext(ctx, `SELECT id, COALESCE(request_id,''), payload_json, file_path, sha256 FROM local_buffer WHERE id = ?`, bufferID).
+		Scan(&record.ID, &record.RequestID, &record.PayloadJSON, &record.FilePath, &record.SHA256)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load buffered record %s: %w", bufferID, err)
+	}
+	if err := ReplayBufferEvent(ctx, database, memoryRoot, record); err != nil {
+		_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='failed', retry_count=retry_count+1 WHERE id=?`, bufferID)
+		return err
+	}
+	_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='replayed', replayed_at=? WHERE id=? AND status='pending'`, time.Now().UTC().Format(time.RFC3339Nano), bufferID)
 	return nil
 }

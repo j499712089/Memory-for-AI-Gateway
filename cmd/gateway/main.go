@@ -87,9 +87,15 @@ func main() {
 
 	// Run the startup recovery pass: replay due outbox rows and local durable
 	// buffers, reclaim expired worker leases and remove stale temp files. Every
-	// step is idempotent, so an interrupted boot can safely retry.
+	// step is idempotent, so an interrupted boot can safely retry. The buffer
+	// handler is wired so pending degraded events actually re-enter SQLite
+	// instead of being marked 'replayed' and silently dropped (ALL-81).
 	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	recoveryReport, recoverErr := db.Recover(recoverCtx, database.Global, memoryRoot, db.RecoveryOptions{})
+	recoveryReport, recoverErr := db.Recover(recoverCtx, database.Global, memoryRoot, db.RecoveryOptions{
+		BufferHandler: func(ctx context.Context, record db.BufferRecord) error {
+			return worker.ReplayBufferEvent(ctx, database.Global, memoryRoot, record)
+		},
+	})
 	recoverCancel()
 	if recoverErr != nil {
 		log.Printf("Startup recovery failed (continuing): %v", recoverErr)
@@ -99,9 +105,10 @@ func main() {
 			recoveryReport.GapCount, recoveryReport.IntegrityOK)
 	}
 
-	// Periodic maintenance: drain outbox retry rows and run the recording
-	// watchdog so pending rows never pile up as a zombie retry queue.
-	go runMaintenance(database.Global)
+	// Periodic maintenance: drain outbox retry rows, replay pending local
+	// buffers, and run the recording watchdog so pending rows never pile up as
+	// a zombie retry queue.
+	go runMaintenance(database.Global, memoryRoot)
 
 	// Setup HTTP router
 	router := httpx.SetupRouter(database.Global, secretsManager, memoryRoot)
@@ -115,12 +122,19 @@ func main() {
 	}
 }
 
-// runMaintenance periodically drains the outbox and runs the recording
+// runMaintenance periodically drains the outbox, replays pending local durable
+// buffers, consumes watchdog-enqueued compensation jobs, and runs the recording
 // watchdog for the lifetime of the gateway process. Outbox rows whose
 // referenced terminal event is already recorded are acknowledged (the failure
 // was captured); rows with no terminal event are left for retry until they
 // reach dead_letter. Expired worker leases are reclaimed by the watchdog.
-func runMaintenance(database *sql.DB) {
+// Buffer replay keeps the degraded write path honest: events that fell back to
+// `90_运行数据/本地持久化缓冲` re-enter SQLite without needing a separate worker
+// process (ALL-81). The missing_response handler closes ghost turns (open
+// ledger rows that never received a terminal) with a cancelled terminal
+// (ALL-84). The first pass runs immediately so leftover ghosts from a previous
+// run converge without waiting out a full tick.
+func runMaintenance(database *sql.DB, memoryRoot string) {
 	ctx := context.Background()
 	sweep := watchdog.New(database, 30*time.Second)
 	ack := func(ctx context.Context, entry worker.OutboxEntry) error {
@@ -133,14 +147,35 @@ func runMaintenance(database *sql.DB) {
 		}
 		return nil
 	}
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
+	// Consume watchdog-enqueued compensation jobs the gateway can handle in
+	// process. Only registered queues are claimed, so foreign queues (asset
+	// refine, wiki build, ...) stay pending for the dedicated worker.
+	queue := worker.NewQueue(database, 30*time.Second)
+	compensation := worker.NewProcessor(queue)
+	if err := worker.RegisterMissingResponse(compensation, database); err != nil {
+		log.Printf("register missing_response handler: %v", err)
+	}
+
+	pass := func() {
 		if _, err := worker.ReplayOutbox(ctx, database, ack); err != nil {
 			log.Printf("outbox drain: %v", err)
 		}
+		if _, err := worker.ReplayPendingBuffers(ctx, database, memoryRoot); err != nil {
+			log.Printf("buffer replay: %v", err)
+		}
+		// Scan first so the missing_response jobs it enqueues for ghost turns
+		// are claimed by the compensation processor in the same pass.
 		if _, err := sweep.Scan(ctx); err != nil {
 			log.Printf("watchdog scan: %v", err)
 		}
+		if _, err := compensation.ProcessOnce(ctx, "gateway-maintenance"); err != nil {
+			log.Printf("compensation job: %v", err)
+		}
+	}
+	pass()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		pass()
 	}
 }

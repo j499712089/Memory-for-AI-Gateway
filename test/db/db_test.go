@@ -1,8 +1,11 @@
 package db_test
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"gateway/internal/db"
@@ -108,5 +111,61 @@ func TestTeamDatabase(t *testing.T) {
 	dbFile := filepath.Join(teamDir, "memory.db")
 	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
 		t.Errorf("Database file was not created")
+	}
+}
+
+// TestDSNPragmasReachEveryPooledConnection guards the ALL-81 root cause: the
+// busy_timeout and foreign_keys pragmas must be part of the connection DSN, not
+// a single db.Exec. modernc.org/sqlite silently ignores mattn-style parameters
+// such as `_busy_timeout`, so without `_pragma=` the extra pooled connections
+// open with busy_timeout=0 and concurrent writers fail with SQLITE_BUSY.
+func TestDSNPragmasReachEveryPooledConnection(t *testing.T) {
+	tmpDir := t.TempDir()
+	database, err := db.Open(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Hold several distinct pooled connections open at once and verify the DSN
+	// pragmas are active on each. With the default unlimited pool this forces
+	// the driver to create multiple underlying sqlite connections.
+	const connections = 4
+	conns := make([]*sql.Conn, 0, connections)
+	defer func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	}()
+	for i := 0; i < connections; i++ {
+		conn, err := database.Global.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("acquire pooled connection %d: %v", i, err)
+		}
+		conns = append(conns, conn)
+	}
+	var wg sync.WaitGroup
+	timeouts := make([]int, connections)
+	foreignKeys := make([]int, connections)
+	for i, conn := range conns {
+		wg.Add(1)
+		go func(index int, c *sql.Conn) {
+			defer wg.Done()
+			if err := c.QueryRowContext(context.Background(), `PRAGMA busy_timeout`).Scan(&timeouts[index]); err != nil {
+				t.Errorf("connection %d busy_timeout: %v", index, err)
+			}
+			if err := c.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&foreignKeys[index]); err != nil {
+				t.Errorf("connection %d foreign_keys: %v", index, err)
+			}
+		}(i, conn)
+	}
+	wg.Wait()
+	for i := 0; i < connections; i++ {
+		if timeouts[i] != 5000 {
+			t.Errorf("connection %d busy_timeout = %d, want 5000 (ALL-81 DSN pragma missing)", i, timeouts[i])
+		}
+		if foreignKeys[i] != 1 {
+			t.Errorf("connection %d foreign_keys = %d, want 1", i, foreignKeys[i])
+		}
 	}
 }

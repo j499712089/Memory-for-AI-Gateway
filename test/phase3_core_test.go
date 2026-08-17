@@ -424,33 +424,66 @@ func TestRecoveryReclaimsLeasesAndReplaysDurableBuffers(t *testing.T) {
 	if _, err := database.Global.Exec(`INSERT INTO outbox (id, event_id, request_id, payload_json, status, retry_count, max_retries, next_retry_at) VALUES ('outbox-1', 'event-outbox', 'request-outbox', '{}', 'pending', 0, 3, ?)`, old); err != nil {
 		t.Fatal(err)
 	}
-	bufferPath := filepath.Join(root, "90_运行数据", "本地持久化缓冲", "buffer.json")
-	if err := os.MkdirAll(filepath.Dir(bufferPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(bufferPath, []byte(`{"request_id":"request-buffer"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	relativeBuffer, err := filepath.Rel(root, bufferPath)
+	// A realistic buffered inbound event: file + local_buffer ledger row.
+	record, err := db.WriteLocalBuffer(context.Background(), database.Global, root, db.BufferEventPayload{
+		BufferKey:      "buffer-1",
+		EventID:        "event-buffer",
+		TurnID:         "turn-buffer",
+		RequestID:      "request-buffer",
+		ConversationID: "conversation-buffer",
+		Direction:      "inbound",
+		Sequence:       1,
+		EventType:      "inbound_persisted",
+		Status:         "ok",
+		RequestBody:    []byte(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Global.Exec(`INSERT INTO local_buffer (id, request_id, payload_json, status, file_path, sha256) VALUES ('buffer-1', 'request-buffer', '{}', 'pending', ?, ?)`, filepath.ToSlash(relativeBuffer), "sha256:"+hashutil.SHA256Bytes([]byte(`{"request_id":"request-buffer"}`))); err != nil {
-		t.Fatal(err)
-	}
+
+	// Recovery without a BufferHandler must NOT mark the pending buffer as
+	// replayed: that would silently drop the event (ALL-81). It stays pending
+	// for a later pass that has a replay implementation.
 	report, err := db.Recover(context.Background(), database.Global, root, db.RecoveryOptions{})
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if report.ReclaimedLeases != 1 || report.ReplayedOutbox != 1 || report.ReplayedBuffers != 1 || !report.IntegrityOK {
+	if report.ReclaimedLeases != 1 || report.ReplayedOutbox != 1 || report.ReplayedBuffers != 0 || !report.IntegrityOK {
 		t.Fatalf("unexpected recovery report: %+v", report)
 	}
 	var jobStatus, outboxStatus, bufferStatus string
 	_ = database.Global.QueryRow(`SELECT status FROM jobs WHERE id='job-expired'`).Scan(&jobStatus)
 	_ = database.Global.QueryRow(`SELECT status FROM outbox WHERE id='outbox-1'`).Scan(&outboxStatus)
-	_ = database.Global.QueryRow(`SELECT status FROM local_buffer WHERE id='buffer-1'`).Scan(&bufferStatus)
-	if jobStatus != "pending" || outboxStatus != "done" || bufferStatus != "replayed" {
+	_ = database.Global.QueryRow(`SELECT status FROM local_buffer WHERE id=?`, record.ID).Scan(&bufferStatus)
+	if jobStatus != "pending" || outboxStatus != "done" || bufferStatus != "pending" {
 		t.Fatalf("recovery states not persisted: job=%s outbox=%s buffer=%s", jobStatus, outboxStatus, bufferStatus)
+	}
+
+	// A recovery pass with a real BufferHandler replays the pending row into
+	// SQLite and marks it replayed.
+	replayed := 0
+	report, err = db.Recover(context.Background(), database.Global, root, db.RecoveryOptions{
+		BufferHandler: func(ctx context.Context, entry db.BufferRecord) error {
+			replayed++
+			return worker.ReplayBufferEvent(ctx, database.Global, root, entry)
+		},
+	})
+	if err != nil {
+		t.Fatalf("recover with handler: %v", err)
+	}
+	if report.ReplayedBuffers != 1 || replayed != 1 {
+		t.Fatalf("expected one buffered event replayed, report=%+v handler_calls=%d", report, replayed)
+	}
+	_ = database.Global.QueryRow(`SELECT status FROM local_buffer WHERE id=?`, record.ID).Scan(&bufferStatus)
+	if bufferStatus != "replayed" {
+		t.Fatalf("buffered row not marked replayed, got %q", bufferStatus)
+	}
+	var inboundEvents int
+	if err := database.Global.QueryRow(`SELECT COUNT(*) FROM turn_events WHERE id='event-buffer' AND event_type='inbound_persisted'`).Scan(&inboundEvents); err != nil {
+		t.Fatal(err)
+	}
+	if inboundEvents != 1 {
+		t.Fatalf("buffered inbound event was not replayed into turn_events, count=%d", inboundEvents)
 	}
 }
 

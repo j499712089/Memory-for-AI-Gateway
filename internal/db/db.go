@@ -13,6 +13,17 @@ type DB struct {
 	Global *sql.DB
 }
 
+// sqliteDSN builds a modernc.org/sqlite connection string for a database
+// file. The driver only applies DSN query parameters to the connection when
+// they are spelled `_pragma` / `_time_format` / `_txlock` (v1.29.5
+// applyQueryParams); mattn-style params such as `_busy_timeout` are silently
+// ignored. busy_timeout and foreign_keys are per-connection pragmas, so they
+// MUST go through the DSN to reach every pooled connection — a db.Exec only
+// configures whichever single connection happens to run it.
+func sqliteDSN(dbPath string) string {
+	return dbPath + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+}
+
 // Open opens the global database and ensures WAL mode is enabled
 func Open(globalDBPath string) (*DB, error) {
 	// Ensure directory exists
@@ -22,7 +33,7 @@ func Open(globalDBPath string) (*DB, error) {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite", globalDBPath+"?_foreign_keys=on&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", sqliteDSN(globalDBPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -69,7 +80,7 @@ func OpenTeamDB(teamsDir, teamID string) (*sql.DB, error) {
 	}
 
 	dbPath := filepath.Join(teamDir, "memory.db")
-	db, err := sql.Open("sqlite", dbPath+"?_foreign_keys=on&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open team database: %w", err)
 	}

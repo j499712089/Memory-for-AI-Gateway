@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,9 +62,11 @@ func Recover(ctx context.Context, database *sql.DB, memoryRoot string, options R
 	if err := replayOutbox(ctx, database, options.OutboxHandler, &report); err != nil {
 		return report, err
 	}
-	if err := replayBuffers(ctx, database, memoryRoot, options.BufferHandler, &report); err != nil {
+	replayed, err := ReplayBuffers(ctx, database, memoryRoot, options.BufferHandler)
+	if err != nil {
 		return report, err
 	}
+	report.ReplayedBuffers = replayed
 	if memoryRoot != "" {
 		_ = filepath.WalkDir(memoryRoot, func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil || entry == nil || entry.IsDir() {
@@ -175,25 +178,114 @@ func replayOutbox(ctx context.Context, database *sql.DB, handler func(context.Co
 	return rows.Err()
 }
 
-func replayBuffers(ctx context.Context, database *sql.DB, memoryRoot string, handler func(context.Context, BufferRecord) error, report *RecoveryReport) error {
+// ReconcileBufferFiles indexes buffered event files under the local buffer
+// directory that have no local_buffer ledger row. The buffer file is the
+// source of truth (§1.5) and the ledger row is the index the replay chain
+// scans; when the best-effort ledger INSERT races a busy database and is
+// dropped, the file would otherwise be orphaned and its event never replayed.
+// Reconciliation runs before every replay sweep (startup recovery and the
+// periodic maintenance loop) so degraded events always re-enter SQLite and
+// never vanish silently (ALL-81).
+func ReconcileBufferFiles(ctx context.Context, database *sql.DB, memoryRoot string) (int, error) {
+	if database == nil {
+		return 0, fmt.Errorf("buffer reconciliation database is nil")
+	}
+	dir := LocalBufferDir(memoryRoot)
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read local buffer dir: %w", err)
+	}
+	indexed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		fullPath := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+		var payload BufferEventPayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		if payload.BufferKey == "" {
+			payload.BufferKey = payload.RequestID
+		}
+		if payload.Direction == "" {
+			payload.Direction = "inbound"
+		}
+		if payload.Sequence == 0 {
+			payload.Sequence = 1
+		}
+		if payload.EventType == "" {
+			continue
+		}
+		if payload.CreatedAt == "" {
+			payload.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		relative, err := filepath.Rel(memoryRoot, fullPath)
+		if err != nil {
+			continue
+		}
+		sha := "sha256:" + hashutil.SHA256Bytes(data)
+		result, err := database.ExecContext(ctx, `
+			INSERT OR IGNORE INTO local_buffer (
+				id, event_id, request_id, turn_id, payload_json, status,
+				file_path, sha256, created_at
+			) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+		`, BufferRecordID(payload), payload.EventID, payload.RequestID, payload.TurnID, string(data), filepath.ToSlash(relative), sha, payload.CreatedAt)
+		if err != nil {
+			return indexed, fmt.Errorf("index buffered file %s: %w", entry.Name(), err)
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			indexed++
+		}
+	}
+	return indexed, nil
+}
+
+// ReplayBuffers replays all pending local_buffer rows back into SQLite through
+// handler, marking each row 'replayed' on success or 'failed' when the handler
+// rejects it. It is the per-row worker for both the startup recovery pass and
+// the periodic maintenance loop. Orphaned buffer files are reconciled into the
+// ledger first so events whose best-effort index INSERT was dropped under
+// contention still get replayed.
+//
+// A nil handler leaves pending rows untouched: without a replay implementation
+// the events are NOT dropped — they stay pending for a later pass that does
+// have one. This is the contract that keeps the degraded path from silently
+// losing memory: only a handler that actually persisted the event (or verified
+// it already exists) may move a row out of 'pending'.
+func ReplayBuffers(ctx context.Context, database *sql.DB, memoryRoot string, handler func(context.Context, BufferRecord) error) (int, error) {
+	if database == nil {
+		return 0, fmt.Errorf("buffer replay database is nil")
+	}
+	if _, err := ReconcileBufferFiles(ctx, database, memoryRoot); err != nil {
+		return 0, err
+	}
 	rows, err := database.QueryContext(ctx, `SELECT id, COALESCE(request_id,''), payload_json, file_path, sha256 FROM local_buffer WHERE status='pending' ORDER BY created_at`)
 	if err != nil {
-		return fmt.Errorf("query buffer recovery: %w", err)
+		return 0, fmt.Errorf("query buffer recovery: %w", err)
 	}
 	defer rows.Close()
+	replayed := 0
 	for rows.Next() {
 		var entry BufferRecord
 		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.PayloadJSON, &entry.FilePath, &entry.SHA256); err != nil {
-			return err
+			return replayed, err
 		}
 		fullPath, err := safeRecoveryPath(memoryRoot, entry.FilePath)
 		if err != nil {
-			_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='failed' WHERE id=?`, entry.ID)
+			_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='failed', retry_count=retry_count+1 WHERE id=?`, entry.ID)
 			continue
 		}
 		matches, err := l0.VerifyFileHash(fullPath, entry.SHA256)
 		if err != nil || !matches {
-			_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='failed' WHERE id=?`, entry.ID)
+			_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='failed', retry_count=retry_count+1 WHERE id=?`, entry.ID)
 			continue
 		}
 		if handler != nil {
@@ -201,13 +293,17 @@ func replayBuffers(ctx context.Context, database *sql.DB, memoryRoot string, han
 				_, _ = database.ExecContext(ctx, `UPDATE local_buffer SET status='failed', retry_count=retry_count+1 WHERE id=?`, entry.ID)
 				continue
 			}
+		} else {
+			// No replay implementation available: leave the row pending for a
+			// later pass. Marking it 'replayed' here would drop the event.
+			continue
 		}
 		if _, err := database.ExecContext(ctx, `UPDATE local_buffer SET status='replayed', replayed_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), entry.ID); err != nil {
-			return err
+			return replayed, err
 		}
-		report.ReplayedBuffers++
+		replayed++
 	}
-	return rows.Err()
+	return replayed, rows.Err()
 }
 
 func safeRecoveryPath(root, relative string) (string, error) {
