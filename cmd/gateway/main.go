@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gateway/internal/config"
 	"gateway/internal/db"
 	"gateway/internal/httpx"
 	"gateway/internal/secrets"
+	"gateway/internal/watchdog"
+	"gateway/internal/worker"
 )
 
 func main() {
@@ -80,6 +85,24 @@ func main() {
 	// Determine memory root from database path
 	memoryRoot := filepath.Dir(filepath.Dir(cfg.Database.GlobalDBPath))
 
+	// Run the startup recovery pass: replay due outbox rows and local durable
+	// buffers, reclaim expired worker leases and remove stale temp files. Every
+	// step is idempotent, so an interrupted boot can safely retry.
+	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	recoveryReport, recoverErr := db.Recover(recoverCtx, database.Global, memoryRoot, db.RecoveryOptions{})
+	recoverCancel()
+	if recoverErr != nil {
+		log.Printf("Startup recovery failed (continuing): %v", recoverErr)
+	} else {
+		log.Printf("Startup recovery: outbox replayed=%d buffers replayed=%d leases reclaimed=%d gaps=%d integrity=%v",
+			recoveryReport.ReplayedOutbox, recoveryReport.ReplayedBuffers, recoveryReport.ReclaimedLeases,
+			recoveryReport.GapCount, recoveryReport.IntegrityOK)
+	}
+
+	// Periodic maintenance: drain outbox retry rows and run the recording
+	// watchdog so pending rows never pile up as a zombie retry queue.
+	go runMaintenance(database.Global)
+
 	// Setup HTTP router
 	router := httpx.SetupRouter(database.Global, secretsManager, memoryRoot)
 
@@ -89,5 +112,35 @@ func main() {
 
 	if err := router.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
+	}
+}
+
+// runMaintenance periodically drains the outbox and runs the recording
+// watchdog for the lifetime of the gateway process. Outbox rows whose
+// referenced terminal event is already recorded are acknowledged (the failure
+// was captured); rows with no terminal event are left for retry until they
+// reach dead_letter. Expired worker leases are reclaimed by the watchdog.
+func runMaintenance(database *sql.DB) {
+	ctx := context.Background()
+	sweep := watchdog.New(database, 30*time.Second)
+	ack := func(ctx context.Context, entry worker.OutboxEntry) error {
+		var exists int
+		if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM turn_events WHERE id = ?`, entry.EventID).Scan(&exists); err != nil {
+			return fmt.Errorf("check outbox terminal event: %w", err)
+		}
+		if exists == 0 {
+			return fmt.Errorf("referenced terminal event is missing")
+		}
+		return nil
+	}
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if _, err := worker.ReplayOutbox(ctx, database, ack); err != nil {
+			log.Printf("outbox drain: %v", err)
+		}
+		if _, err := sweep.Scan(ctx); err != nil {
+			log.Printf("watchdog scan: %v", err)
+		}
 	}
 }

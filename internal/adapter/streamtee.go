@@ -3,7 +3,9 @@ package adapter
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -123,7 +125,13 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 			}
 
 			if err != nil {
-				if st.isDisconnected() {
+				// A client disconnect cancels the request context, which cancels
+				// the upstream request; the upstream read then surfaces
+				// context.Canceled / context.DeadlineExceeded. That is a stream
+				// interruption, not an upstream protocol error (those are observed
+				// before the stream is established), so record a partial terminal
+				// instead of an error that would enqueue a spurious outbox retry.
+				if st.isDisconnected() || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return turn.StatusPartial, err
 				}
 				return turn.StatusError, err
