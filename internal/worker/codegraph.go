@@ -48,21 +48,50 @@ func registerCodeGraph(processor *Processor, deps AssetWorkerDeps) {
 		if err := json.Unmarshal([]byte(claim.PayloadJSON), &payload); err != nil {
 			return fmt.Errorf("codegraph payload: %w", err)
 		}
-		if payload.TeamID == "" || payload.RepoID == "" {
-			return fmt.Errorf("codegraph team and repo ids are required")
+		if payload.TeamID == "" {
+			return fmt.Errorf("codegraph team id is required")
 		}
 		teamDB, err := deps.resolveTeamDB(payload.TeamID)
 		if err != nil {
 			return err
 		}
 		defer teamDB.Close()
-		repo, err := db.GetCodeRepoByID(ctx, teamDB, payload.RepoID)
-		if err != nil {
-			return fmt.Errorf("load code repo %s: %w", payload.RepoID, err)
+
+		// A team-level sweep is a valid no-op when no repository has been
+		// registered yet. The refine pipeline still records that the codegraph
+		// sub-track was considered, while avoiding a permanently failing job for
+		// an empty RepoID.
+		if payload.RepoID == "" {
+			rows, err := teamDB.QueryContext(ctx, `SELECT id FROM code_repos ORDER BY id`)
+			if err != nil {
+				return fmt.Errorf("list code repos: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var repoID string
+				if err := rows.Scan(&repoID); err != nil {
+					return fmt.Errorf("scan code repo: %w", err)
+				}
+				if err := indexCodeRepo(ctx, teamDB, repoID, deps.Parser); err != nil {
+					return err
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate code repos: %w", err)
+			}
+			return nil
 		}
-		if _, err := IndexRepo(ctx, teamDB, repo, deps.Parser); err != nil {
-			return err
-		}
-		return nil
+		return indexCodeRepo(ctx, teamDB, payload.RepoID, deps.Parser)
 	})
+}
+
+func indexCodeRepo(ctx context.Context, teamDB *sql.DB, repoID string, parser codegraph.Parser) error {
+	repo, err := db.GetCodeRepoByID(ctx, teamDB, repoID)
+	if err != nil {
+		return fmt.Errorf("load code repo %s: %w", repoID, err)
+	}
+	if _, err := IndexRepo(ctx, teamDB, repo, parser); err != nil {
+		return fmt.Errorf("index code repo %s: %w", repoID, err)
+	}
+	return nil
 }

@@ -242,20 +242,44 @@ func replayTerminalEvent(ctx context.Context, database *sql.DB, payload db.Buffe
 	if err := database.QueryRowContext(ctx, `SELECT final_status FROM turn_ledger WHERE turn_id = ?`, payload.TurnID).Scan(&finalStatus); err != nil {
 		return fmt.Errorf("check final status: %w", err)
 	}
-	if finalStatus.Valid && finalStatus.String != "" {
+	if !finalStatus.Valid || finalStatus.String == "" {
+		if payload.ContentHash != "" && payload.ContentPath != "" {
+			_ = turn.SetTurnResponse(database, payload.TurnID, payload.ContentHash, payload.ContentPath)
+		}
+		status := turn.TerminalStatus(payload.EventType)
+		if _, err := turn.WriteTerminalStatusWithID(database, payload.EventID, payload.TurnID, payload.RequestID, payload.ConversationID, payload.SessionID, payload.TeamID, status, payload.ErrorMsg); err != nil {
+			return fmt.Errorf("replay terminal event: %w", err)
+		}
+		if payload.ContentHash != "" && payload.ContentPath != "" {
+			_ = turn.SetEventContent(database, payload.EventID, payload.ContentHash, payload.ContentPath)
+		}
+	}
+	if turn.TerminalStatus(payload.EventType) != turn.StatusComplete {
 		return nil
 	}
-	if payload.ContentHash != "" && payload.ContentPath != "" {
-		_ = turn.SetTurnResponse(database, payload.TurnID, payload.ContentHash, payload.ContentPath)
+	return enqueueBufferedL1Refine(ctx, database, payload)
+}
+
+func enqueueBufferedL1Refine(ctx context.Context, database *sql.DB, payload db.BufferEventPayload) error {
+	facts := ExtractL1Facts(payload.FactText, payload.TurnID)
+	if len(facts) == 0 {
+		return nil
 	}
-	status := turn.TerminalStatus(payload.EventType)
-	if _, err := turn.WriteTerminalStatusWithID(database, payload.EventID, payload.TurnID, payload.RequestID, payload.ConversationID, payload.SessionID, payload.TeamID, status, payload.ErrorMsg); err != nil {
-		return fmt.Errorf("replay terminal event: %w", err)
+	var inboundEventID string
+	_ = database.QueryRowContext(ctx, `SELECT COALESCE(inbound_event_id,'') FROM turn_ledger WHERE turn_id=?`, payload.TurnID).Scan(&inboundEventID)
+	sources := make([]string, 0, 2)
+	if inboundEventID != "" {
+		sources = append(sources, inboundEventID)
 	}
-	if payload.ContentHash != "" && payload.ContentPath != "" {
-		_ = turn.SetEventContent(database, payload.EventID, payload.ContentHash, payload.ContentPath)
+	if payload.EventID != "" {
+		sources = append(sources, payload.EventID)
 	}
-	return nil
+	queue := NewQueue(database, 30*time.Second)
+	_, err := EnqueueL1Refine(context.WithoutCancel(ctx), queue, L1RefinePayload{
+		TeamID: payload.TeamID, AgentID: payload.AgentID, IdentityCardID: payload.IdentityCardID,
+		TurnID: payload.TurnID, SourceEventIDs: sources, Facts: facts, CompletedAt: time.Now().UTC(),
+	})
+	return err
 }
 
 // ReplayPendingBuffers drains every pending local_buffer row back into SQLite

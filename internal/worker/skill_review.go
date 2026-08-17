@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"gateway/internal/db"
@@ -24,10 +25,10 @@ func EnqueueSkillReview(ctx context.Context, queue *Queue, payload SkillReviewPa
 	if queue == nil {
 		return "", fmt.Errorf("queue is nil")
 	}
-	if payload.Action != "approve" && payload.Action != "deprecate" {
-		return "", fmt.Errorf("skill review action must be approve or deprecate")
+	if payload.Action != "approve" && payload.Action != "deprecate" && payload.Action != "candidate" {
+		return "", fmt.Errorf("skill review action must be candidate, approve or deprecate")
 	}
-	return queue.Enqueue(ctx, Job{
+	return enqueueUniqueJob(ctx, queue, Job{
 		Queue:        "skill_review",
 		TeamID:       payload.TeamID,
 		AgentID:      payload.AgentID,
@@ -36,6 +37,74 @@ func EnqueueSkillReview(ctx context.Context, queue *Queue, payload SkillReviewPa
 		PartitionKey: "skill:" + payload.TeamID + ":" + payload.Skill.Name,
 		Payload:      payload,
 	})
+}
+
+// RecordSkillCandidate stores a newly extracted skill as a reviewable
+// candidate without approving it. This keeps automatic extraction separate
+// from the human/agent approval transition while still making the candidate
+// visible to the skill_review queue and vault.
+func RecordSkillCandidate(ctx context.Context, teamDB *sql.DB, teamID string, candidate skill.Skill, createdBy string) (db.Skill, error) {
+	if teamDB == nil {
+		return db.Skill{}, fmt.Errorf("team database is nil")
+	}
+	if candidate.Status == "" {
+		candidate.Status = "candidate"
+	}
+	if candidate.Scope == "" {
+		candidate.Scope = "team"
+	}
+	if candidate.Version == "" {
+		candidate.Version = "0.1.0"
+	}
+	if candidate.DisplayName == "" {
+		candidate.DisplayName = candidate.Name
+	}
+	if err := candidate.Validate(); err != nil {
+		return db.Skill{}, fmt.Errorf("skill candidate validation failed: %w", err)
+	}
+
+	existing, err := db.GetSkillByName(ctx, teamDB, teamID, candidate.Name)
+	if err != nil && err != sql.ErrNoRows {
+		return db.Skill{}, err
+	}
+	assetID := existing.AssetID
+	if assetID == "" {
+		assetID = "skill-asset-" + candidate.Name
+		if _, assetErr := db.GetAsset(ctx, teamDB, teamID, assetID); errors.Is(assetErr, sql.ErrNoRows) {
+			if err := db.CreateAsset(ctx, teamDB, db.Asset{
+				ID: assetID, TeamID: teamID, AssetType: "skill", Name: candidate.DisplayName,
+				Slug: candidate.Name, Summary: candidate.TriggerBoundary, SourceEventIDs: candidate.SourceIDs,
+				Confidence: 0.6, Status: "candidate", Visibility: "team", Version: 1,
+			}, createdBy); err != nil {
+				return db.Skill{}, fmt.Errorf("create skill candidate asset: %w", err)
+			}
+		} else if assetErr != nil {
+			return db.Skill{}, fmt.Errorf("check skill candidate asset: %w", assetErr)
+		}
+	}
+	steps := make([]string, 0, len(candidate.Steps))
+	for _, step := range candidate.Steps {
+		steps = append(steps, step.Title+": "+step.Body)
+	}
+	validation := map[string]any{"pass_criteria": candidate.Validation.PassCriteria}
+	stored, err := db.UpsertSkill(ctx, teamDB, db.Skill{
+		ID: existing.ID, AssetID: assetID, Name: candidate.Name, DisplayName: candidate.DisplayName,
+		Version: candidate.Version, Status: "candidate", Scope: candidate.Scope,
+		TriggerBoundary: candidate.TriggerBoundary, Steps: steps, Validation: validation,
+		SourceIDs: candidate.SourceIDs, ResourceRefs: candidate.ResourceRefs,
+		Entrypoint: candidate.Entrypoint, ManifestPath: candidate.ManifestPath,
+	}, createdBy)
+	if err != nil {
+		return db.Skill{}, fmt.Errorf("upsert skill candidate: %w", err)
+	}
+	if err := db.CreateSkillVersion(ctx, teamDB, db.SkillVersion{
+		ID: "sv-" + stored.ID + "-" + stored.Version + "-candidate", SkillID: stored.ID,
+		Version: stored.Version, Status: "candidate", ContentRef: stored.ManifestPath,
+		SourceIDs: stored.SourceIDs, CreatedBy: createdBy,
+	}); err != nil {
+		return db.Skill{}, fmt.Errorf("record skill candidate version: %w", err)
+	}
+	return stored, nil
 }
 
 // ApproveSkill validates a candidate, promotes it to approved, and records an
@@ -181,6 +250,8 @@ func registerSkillReview(processor *Processor, deps AssetWorkerDeps) {
 			}
 		}
 		switch payload.Action {
+		case "candidate":
+			_, err = RecordSkillCandidate(ctx, teamDB, payload.TeamID, payload.Skill, payload.AgentID)
 		case "approve":
 			_, err = ApproveSkill(ctx, teamDB, payload.TeamID, payload.Skill, payload.AgentID)
 		case "deprecate":
@@ -191,7 +262,7 @@ func registerSkillReview(processor *Processor, deps AssetWorkerDeps) {
 		if err != nil {
 			return err
 		}
-		if payload.Action == "approve" {
+		if payload.Action == "approve" || payload.Action == "candidate" {
 			_, err = WriteAssetMarkdown(writer, "skill", payload.Skill.Name, payload.Skill.DisplayName, payload.Skill.TriggerBoundary, payload.Skill.SourceIDs)
 		}
 		return err

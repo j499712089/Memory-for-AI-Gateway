@@ -46,6 +46,13 @@ type BufferEventPayload struct {
 	InjectionText            string   `json:"injection_text,omitempty"`
 	InjectionSources         []string `json:"injection_sources,omitempty"`
 
+	// Refine replay material. These fields let a terminal that first landed in
+	// the local durable buffer trigger the same automatic L1 pipeline after the
+	// buffer is replayed into SQLite.
+	AgentID        string `json:"agent_id,omitempty"`
+	IdentityCardID string `json:"identity_card_id,omitempty"`
+	FactText       string `json:"fact_text,omitempty"`
+
 	CreatedAt string `json:"created_at,omitempty"`
 }
 

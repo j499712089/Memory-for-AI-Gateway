@@ -62,6 +62,7 @@ type GatewayHandler struct {
 	upstreamClient *adapter.UpstreamClient
 	teamsDir       string
 	tokenBudget    int
+	refineQueue    *worker.Queue
 
 	// sqliteWriteProbe and bufferWriteProbe are test seams for the recording
 	// degradation gate. nil means the sink is considered writable; returning a
@@ -85,6 +86,7 @@ func NewGatewayHandler(db *sql.DB, secretsManager *secrets.Manager, memoryRoot s
 		upstreamClient: adapter.NewUpstreamClient(120 * time.Second),
 		teamsDir:       filepath.Join(memoryRoot, "teams"),
 		tokenBudget:    tokenBudget,
+		refineQueue:    worker.NewQueue(db, 30*time.Second),
 	}
 }
 
@@ -269,10 +271,10 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 	}
 
 	if inbound.Stream {
-		h.forwardStream(c, upstreamChannel, injectedBody, protocol, upstreamKey, teamID, turnID, requestID, conversationID, sessionID)
+		h.forwardStream(c, upstreamChannel, injectedBody, protocol, upstreamKey, teamID, turnID, requestID, conversationID, sessionID, agentID, identityCardID, inboundEventID, extractInjectionQuery(inbound))
 		return
 	}
-	h.forwardNonStream(c, upstreamChannel, injectedBody, protocol, upstreamKey, teamID, turnID, requestID, conversationID, sessionID, idempotencyKey)
+	h.forwardNonStream(c, upstreamChannel, injectedBody, protocol, upstreamKey, teamID, turnID, requestID, conversationID, sessionID, idempotencyKey, agentID, identityCardID, inboundEventID, extractInjectionQuery(inbound))
 }
 
 // inboundRecord carries everything needed to durably record one inbound turn.
@@ -298,6 +300,10 @@ type terminalRecord struct {
 	ConversationID string
 	SessionID      string
 	TeamID         string
+	AgentID        string
+	IdentityCardID string
+	InboundEventID string
+	FactText       string
 	Status         turn.TerminalStatus
 	ErrorMsg       string
 	ContentHash    string
@@ -373,6 +379,8 @@ func (h *GatewayHandler) persistInboundToBuffer(ctx context.Context, in inboundR
 		InjectionManifestVersion: in.InjectionPkg.ManifestVersion,
 		InjectionText:            in.InjectionText,
 		InjectionSources:         in.InjectionPkg.SourceEventIDs,
+		AgentID:                  "",
+		IdentityCardID:           "",
 	}
 	record, err := db.WriteLocalBuffer(ctx, h.db, h.memoryRoot, payload)
 	if err != nil {
@@ -391,8 +399,15 @@ func (h *GatewayHandler) persistInboundToBuffer(ctx context.Context, in inboundR
 // terminal event landed in the local durable buffer instead of SQLite.
 func (h *GatewayHandler) recordTerminalResult(ctx context.Context, tr terminalRecord) (string, bool, error) {
 	if h.sqliteWriteProbe == nil || h.sqliteWriteProbe() == nil {
-		if err := h.persistTerminalToSQLite(ctx, tr); err == nil {
-			return tr.EventID, false, nil
+		if recordedEventID, err := h.persistTerminalToSQLite(ctx, tr); err == nil {
+			tr.EventID = recordedEventID
+			if err := h.enqueueL1Refine(ctx, tr); err != nil {
+				// The terminal is already durable. Keep the client response
+				// successful and let the worker queue retry on the next completed
+				// turn rather than rewriting a terminal event.
+				log.Printf("enqueue l1 refine for turn %s: %v", tr.TurnID, err)
+			}
+			return recordedEventID, false, nil
 		}
 	}
 	if h.bufferWriteProbe == nil || h.bufferWriteProbe() == nil {
@@ -403,15 +418,42 @@ func (h *GatewayHandler) recordTerminalResult(ctx context.Context, tr terminalRe
 	return "", false, errRecordingUnavailable
 }
 
-func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr terminalRecord) error {
+func (h *GatewayHandler) enqueueL1Refine(ctx context.Context, tr terminalRecord) error {
+	if tr.Status != turn.StatusComplete || h.refineQueue == nil {
+		return nil
+	}
+	facts := worker.ExtractL1Facts(tr.FactText, tr.TurnID)
+	if len(facts) == 0 {
+		return nil
+	}
+	sourceIDs := make([]string, 0, 2)
+	if tr.InboundEventID != "" {
+		sourceIDs = append(sourceIDs, tr.InboundEventID)
+	}
+	if tr.EventID != "" {
+		sourceIDs = append(sourceIDs, tr.EventID)
+	}
+	_, err := worker.EnqueueL1Refine(context.WithoutCancel(ctx), h.refineQueue, worker.L1RefinePayload{
+		TeamID:         tr.TeamID,
+		AgentID:        tr.AgentID,
+		IdentityCardID: tr.IdentityCardID,
+		TurnID:         tr.TurnID,
+		SourceEventIDs: sourceIDs,
+		Facts:          facts,
+		CompletedAt:    time.Now().UTC(),
+	})
+	return err
+}
+
+func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr terminalRecord) (string, error) {
 	if tr.ContentHash != "" && tr.ContentPath != "" {
 		if err := turn.SetTurnResponse(h.db, tr.TurnID, tr.ContentHash, tr.ContentPath); err != nil {
-			return err
+			return "", err
 		}
 	}
 	recordedEventID, err := turn.WriteTerminalStatusWithID(h.db, tr.EventID, tr.TurnID, tr.RequestID, tr.ConversationID, tr.SessionID, tr.TeamID, tr.Status, tr.ErrorMsg)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if tr.ContentHash != "" && tr.ContentPath != "" {
 		// WriteTerminalStatusWithID is idempotent: on a no-op or a superseded
@@ -420,7 +462,7 @@ func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr termina
 		_ = turn.SetEventContent(h.db, recordedEventID, tr.ContentHash, tr.ContentPath)
 		_ = h.registerEventFile(recordedEventID, tr.ContentPath, tr.ContentHash)
 	}
-	return nil
+	return recordedEventID, nil
 }
 
 func (h *GatewayHandler) persistTerminalToBuffer(ctx context.Context, tr terminalRecord) error {
@@ -432,6 +474,9 @@ func (h *GatewayHandler) persistTerminalToBuffer(ctx context.Context, tr termina
 		ConversationID: tr.ConversationID,
 		SessionID:      tr.SessionID,
 		TeamID:         tr.TeamID,
+		AgentID:        tr.AgentID,
+		IdentityCardID: tr.IdentityCardID,
+		FactText:       worker.RedactSensitiveText(tr.FactText),
 		Direction:      "outbound",
 		Sequence:       1,
 		EventType:      string(tr.Status),
@@ -477,7 +522,7 @@ func buildInjectedRequest(protocol string, body []byte, injectionText string) ([
 	}
 }
 
-func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChannelInfo, body []byte, protocol, apiKey, teamID, turnID, requestID, conversationID, sessionID, idempotencyKey string) {
+func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChannelInfo, body []byte, protocol, apiKey, teamID, turnID, requestID, conversationID, sessionID, idempotencyKey, agentID, identityCardID, inboundEventID, factText string) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
 	defer cancel()
 
@@ -498,15 +543,19 @@ func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChan
 	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer terminalCancel()
 	if _, terminalDegraded, err := h.recordTerminalResult(terminalCtx, terminalRecord{
-		EventID:      terminalEventID,
-		TurnID:       turnID,
-		RequestID:    requestID,
+		EventID:        terminalEventID,
+		TurnID:         turnID,
+		RequestID:      requestID,
 		ConversationID: conversationID,
-		SessionID:    sessionID,
-		TeamID:       teamID,
-		Status:       turn.StatusComplete,
-		ContentHash:  responseHash,
-		ContentPath:  responsePath,
+		SessionID:      sessionID,
+		TeamID:         teamID,
+		AgentID:        agentID,
+		IdentityCardID: identityCardID,
+		InboundEventID: inboundEventID,
+		FactText:       factText,
+		Status:         turn.StatusComplete,
+		ContentHash:    responseHash,
+		ContentPath:    responsePath,
 	}); err != nil {
 		// The upstream result already succeeded; a recording failure must not
 		// take the client's response hostage. Log it and deliver normally.
@@ -527,7 +576,7 @@ func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChan
 	c.Data(resp.StatusCode, contentType, resp.Body)
 }
 
-func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannelInfo, body []byte, protocol, apiKey, teamID, turnID, requestID, conversationID, sessionID string) {
+func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannelInfo, body []byte, protocol, apiKey, teamID, turnID, requestID, conversationID, sessionID, agentID, identityCardID, inboundEventID, factText string) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Minute)
 	defer cancel()
 
@@ -563,14 +612,18 @@ func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannel
 	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer terminalCancel()
 	terminalEventID, _, terminalErr := h.streamTerminalResult(terminalCtx, terminalRecord{
-		EventID:      idgen.NewEventID(),
-		TurnID:       turnID,
-		RequestID:    requestID,
+		EventID:        idgen.NewEventID(),
+		TurnID:         turnID,
+		RequestID:      requestID,
 		ConversationID: conversationID,
-		SessionID:    sessionID,
-		TeamID:       teamID,
-		Status:       terminalStatus,
-		ErrorMsg:     errorMessage,
+		SessionID:      sessionID,
+		TeamID:         teamID,
+		AgentID:        agentID,
+		IdentityCardID: identityCardID,
+		InboundEventID: inboundEventID,
+		FactText:       factText,
+		Status:         terminalStatus,
+		ErrorMsg:       errorMessage,
 	})
 	if terminalErr != nil {
 		// The stream result is already settled; a recording failure must not
