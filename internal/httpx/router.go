@@ -18,6 +18,7 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 	healthHandler := NewHealthHandler(db)
 	adminHandler := NewAdminHandler(db, secretsManager)
 	gatewayHandler := NewGatewayHandler(db, secretsManager, memoryRoot)
+	mcpHandler := NewMCPHandler(db, memoryRoot)
 
 	// Create auth middleware
 	authMgr := auth.NewMiddleware(db)
@@ -38,6 +39,21 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 		api.GET("/api-keys", adminHandler.HandleListAPIKeys)
 		api.POST("/api-keys", adminHandler.HandleCreateAPIKey)
 		api.GET("/recording-health", healthHandler.HandleRecordingHealth)
+
+		// MCP internal service API (consumed by the MCP Server :8097).
+		// Auth inherited from the /api group; scope check is route-local.
+		mcp := api.Group("/mcp")
+		mcp.Use(requireMCPScope(db))
+		{
+			mcp.POST("/memory/search", mcpHandler.HandleMemorySearch)
+			mcp.POST("/memory/get", mcpHandler.HandleMemoryGet)
+			mcp.POST("/memory/append", mcpHandler.HandleMemoryAppend)
+			mcp.POST("/wiki/search", mcpHandler.HandleWikiSearch)
+			mcp.POST("/codegraph/impact", mcpHandler.HandleCodeGraphImpact)
+			mcp.POST("/skill/search", mcpHandler.HandleSkillSearch)
+			mcp.POST("/binding/get", mcpHandler.HandleBindingGet)
+			mcp.POST("/assets/list", mcpHandler.HandleAssetsList)
+		}
 	}
 
 	// Gateway LLM endpoints (requires auth + idempotency)
