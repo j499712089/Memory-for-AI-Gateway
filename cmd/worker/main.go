@@ -59,6 +59,27 @@ func main() {
 	// .runtime/ and L0_原始记录 are gitignored and never committed.
 	memoryRoot := filepath.Dir(filepath.Dir(cfg.Database.GlobalDBPath))
 
+	// A worker may be started without the gateway (for example after a
+	// gateway crash or during an isolated recovery run), so it must perform
+	// the same idempotent startup recovery pass. In particular, pending local
+	// buffer files are the source of truth for degraded writes and need to be
+	// replayed before the worker starts claiming new jobs.
+	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	recoveryReport, recoverErr := db.Recover(recoverCtx, database.Global, memoryRoot, db.RecoveryOptions{
+		BufferHandler: func(ctx context.Context, record db.BufferRecord) error {
+			return worker.ReplayBufferEvent(ctx, database.Global, memoryRoot, record)
+		},
+	})
+	recoverCancel()
+	if recoverErr != nil {
+		log.Printf("Startup recovery failed (continuing): %v", recoverErr)
+	} else {
+		log.Printf("Startup recovery: outbox replayed=%d buffers replayed=%d leases reclaimed=%d gaps=%d integrity=%v",
+			recoveryReport.ReplayedOutbox, recoveryReport.ReplayedBuffers,
+			recoveryReport.ReclaimedLeases, recoveryReport.GapCount,
+			recoveryReport.IntegrityOK)
+	}
+
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "worker"

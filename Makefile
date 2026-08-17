@@ -1,4 +1,4 @@
-.PHONY: build worker run test clean
+.PHONY: build worker run run-all run-worker test clean
 
 build:
 	go build -o gateway.exe cmd/gateway/main.go
@@ -8,6 +8,14 @@ worker:
 
 run: build
 	./gateway.exe
+
+# run-all starts both the gateway and the worker: the gateway serves HTTP and
+# replays pending buffers/outbox at startup, the worker consumes the jobs queue
+# (L1-L4 refinement, wiki/codegraph/skill review, git batch commit) and runs
+# the recording watchdog. Without the worker, refinement and compensation never
+# run (ALL-82).
+run-all: build worker
+	./gateway.exe & ./worker.exe
 
 run-worker: worker
 	./worker.exe
