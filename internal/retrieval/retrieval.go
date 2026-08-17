@@ -1,0 +1,68 @@
+package retrieval
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"gateway/internal/acl"
+)
+
+type Request struct {
+	TeamID         string
+	AgentID        string
+	UserID         string
+	Role           string
+	IdentityCardID string
+	Query          string
+	Limit          int
+	TokenBudget    int
+	Timeout        time.Duration
+}
+
+type Pipeline struct{ database *sql.DB }
+
+func NewPipeline(database *sql.DB) *Pipeline { return &Pipeline{database: database} }
+
+func (p *Pipeline) Search(ctx context.Context, request Request) (Result, error) {
+	if p == nil || p.database == nil {
+		return Result{}, fmt.Errorf("retrieval pipeline database is nil")
+	}
+	if request.TeamID == "" {
+		return Result{}, fmt.Errorf("team id is required")
+	}
+	if request.Timeout <= 0 {
+		request.Timeout = 300 * time.Millisecond
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, request.Timeout)
+	defer cancel()
+	searchLimit := request.Limit * 5
+	if searchLimit <= 0 {
+		searchLimit = 50
+	}
+	if searchLimit > 200 {
+		searchLimit = 200
+	}
+	candidates, err := SearchFTS(searchCtx, p.database, request.Query, searchLimit)
+	if err != nil {
+		return Result{}, err
+	}
+	subject := acl.Subject{TeamID: request.TeamID, AgentID: request.AgentID, UserID: request.UserID, Role: request.Role, IdentityCardID: request.IdentityCardID}
+	visible := make([]Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		allowed, err := acl.CanRead(searchCtx, p.database, acl.Resource{ID: candidate.ID, TeamID: candidate.TeamID, IdentityCardID: candidate.IdentityCardID, Visibility: candidate.Visibility}, subject)
+		if err != nil {
+			return Result{}, err
+		}
+		if allowed {
+			visible = append(visible, candidate)
+		}
+	}
+	deadline, _ := searchCtx.Deadline()
+	return Fuse(visible, Limits{MaxResults: request.Limit, MaxTokens: request.TokenBudget, Deadline: deadline}), nil
+}
+
+func Search(ctx context.Context, database *sql.DB, request Request) (Result, error) {
+	return NewPipeline(database).Search(ctx, request)
+}

@@ -37,6 +37,7 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 		// API Keys
 		api.GET("/api-keys", adminHandler.HandleListAPIKeys)
 		api.POST("/api-keys", adminHandler.HandleCreateAPIKey)
+		api.GET("/recording-health", healthHandler.HandleRecordingHealth)
 	}
 
 	// Gateway LLM endpoints (requires auth + idempotency)
