@@ -70,6 +70,8 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 
 		// Responses
 		gateway.POST("/codex/:channel/v1/responses", gatewayHandler.HandleResponses)
+		// Responses (without /v1 - for Codex Runtime compatibility)
+		gateway.POST("/codex/:channel/responses", gatewayHandler.HandleResponses)
 
 		// DSH (defaults to chat_completions)
 		gateway.POST("/dsh/:channel/v1/chat/completions", gatewayHandler.HandleChatCompletions)
