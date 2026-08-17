@@ -158,6 +158,9 @@ func TestRecordingGateDegradesInboundToLocalBuffer(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200 after degraded recording, got %d: %s", response.Code, response.Body.String())
 	}
+	if response.Header().Get(httpx.RecordingDegradedHeader) != "buffer" {
+		t.Fatalf("expected %s: buffer on degraded response, got %q", httpx.RecordingDegradedHeader, response.Header().Get(httpx.RecordingDegradedHeader))
+	}
 	if upstreamCalls.Load() != 1 {
 		t.Fatalf("expected upstream to be called once, got %d", upstreamCalls.Load())
 	}
@@ -206,6 +209,9 @@ func TestRecordingGateBlocksForwardWhenBothSinksUnavailable(t *testing.T) {
 	}
 	if body.Error.Type != "recording_unavailable" {
 		t.Fatalf("expected error.type=recording_unavailable, got %q", body.Error.Type)
+	}
+	if header := response.Header().Get(httpx.RecordingDegradedHeader); header != "" {
+		t.Fatalf("expected no %s header on the 500 path, got %q", httpx.RecordingDegradedHeader, header)
 	}
 	if upstreamCalls.Load() != 0 {
 		t.Fatalf("request must NOT be forwarded upstream when both sinks are unwritable, got %d calls", upstreamCalls.Load())
@@ -296,6 +302,9 @@ func TestRecordingGateBlocksStreamingRequestWhenBothSinksUnavailable(t *testing.
 	}
 	if !strings.Contains(w.Body.String(), `"recording_unavailable"`) {
 		t.Fatalf("expected recording_unavailable error body, got %s", w.Body.String())
+	}
+	if header := w.Header().Get(httpx.RecordingDegradedHeader); header != "" {
+		t.Fatalf("expected no %s header on the streaming 500 path, got %q", httpx.RecordingDegradedHeader, header)
 	}
 	if upstreamCalls.Load() != 0 {
 		t.Fatalf("streaming request must not be forwarded when recording is unavailable, got %d calls", upstreamCalls.Load())

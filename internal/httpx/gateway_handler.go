@@ -34,6 +34,13 @@ var errChannelDisabled = errors.New("upstream channel is disabled")
 // (Constitution §1: DB and local buffer both unwritable → do not forward).
 var errRecordingUnavailable = errors.New("recording unavailable")
 
+// RecordingDegradedHeader is set on the response whenever a request was
+// accepted by the local durable buffer instead of SQLite (dual-write
+// degradation, Specify §1.5). Downstream clients can use it to surface that
+// memory was recorded in degraded mode rather than written to the L0 ledger
+// synchronously.
+const RecordingDegradedHeader = "X-Recording-Degraded"
+
 // GatewayHandler handles LLM proxy requests for three protocols.
 type GatewayHandler struct {
 	db             *sql.DB
@@ -199,7 +206,8 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		InjectionPkg:   injectionPkg,
 		InjectionText:  injectionText,
 	}
-	if err := h.recordInbound(c.Request.Context(), inboundRecord); err != nil {
+	degraded, err := h.recordInbound(c.Request.Context(), inboundRecord)
+	if err != nil {
 		if errors.Is(err, errRecordingUnavailable) {
 			writeGatewayError(c, http.StatusInternalServerError, "recording_unavailable", "Memory recording unavailable: SQLite and local buffer are both unwritable; refusing to forward upstream", requestID)
 			return
@@ -207,6 +215,12 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
 		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to record inbound request", requestID)
 		return
+	}
+	if degraded {
+		// The inbound event was accepted by the local durable buffer instead
+		// of SQLite (Specify §1.5 degradation). Surface it to the client; for
+		// streaming requests this header must be set before the SSE bytes.
+		c.Header(RecordingDegradedHeader, "buffer")
 	}
 
 	upstreamKey, err := h.secretsManager.RetrieveSecret(upstreamChannel.APIKeyRef)
@@ -253,13 +267,14 @@ type terminalRecord struct {
 
 // recordInbound applies the dual-write degradation gate (Constitution §1.5,
 // Specify §1.5) to the inbound event: SQLite first, then the local durable
-// buffer. It returns nil as soon as either sink accepted the event. It returns
-// errRecordingUnavailable only when both sinks are unwritable — the caller
-// must then NOT forward upstream.
-func (h *GatewayHandler) recordInbound(ctx context.Context, in inboundRecord) error {
+// buffer. It returns nil as soon as either sink accepted the event, with
+// degraded=true when the event landed in the local buffer instead of SQLite.
+// It returns errRecordingUnavailable only when both sinks are unwritable — the
+// caller must then NOT forward upstream.
+func (h *GatewayHandler) recordInbound(ctx context.Context, in inboundRecord) (bool, error) {
 	if h.sqliteWriteProbe == nil || h.sqliteWriteProbe() == nil {
 		if err := h.persistInboundToSQLite(ctx, in); err == nil {
-			return nil
+			return false, nil
 		}
 	}
 	// SQLite is (or appears) unwritable: drop the idempotency reservation so a
@@ -267,10 +282,10 @@ func (h *GatewayHandler) recordInbound(ctx context.Context, in inboundRecord) er
 	h.releaseIdempotency(in.IdempotencyKey, in.RequestID)
 	if h.bufferWriteProbe == nil || h.bufferWriteProbe() == nil {
 		if err := h.persistInboundToBuffer(ctx, in); err == nil {
-			return nil
+			return true, nil
 		}
 	}
-	return errRecordingUnavailable
+	return false, errRecordingUnavailable
 }
 
 func (h *GatewayHandler) persistInboundToSQLite(ctx context.Context, in inboundRecord) error {
@@ -333,19 +348,20 @@ func (h *GatewayHandler) persistInboundToBuffer(ctx context.Context, in inboundR
 // recordTerminalResult durably records a terminal event with the same
 // degradation gate as the inbound event. It never fails the client response:
 // the caller decides how to surface the error, and an upstream result that
-// already succeeded must still be delivered.
-func (h *GatewayHandler) recordTerminalResult(ctx context.Context, tr terminalRecord) (string, error) {
+// already succeeded must still be delivered. degraded=true signals that the
+// terminal event landed in the local durable buffer instead of SQLite.
+func (h *GatewayHandler) recordTerminalResult(ctx context.Context, tr terminalRecord) (string, bool, error) {
 	if h.sqliteWriteProbe == nil || h.sqliteWriteProbe() == nil {
 		if err := h.persistTerminalToSQLite(ctx, tr); err == nil {
-			return tr.EventID, nil
+			return tr.EventID, false, nil
 		}
 	}
 	if h.bufferWriteProbe == nil || h.bufferWriteProbe() == nil {
 		if err := h.persistTerminalToBuffer(ctx, tr); err == nil {
-			return tr.EventID, nil
+			return tr.EventID, true, nil
 		}
 	}
-	return "", errRecordingUnavailable
+	return "", false, errRecordingUnavailable
 }
 
 func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr terminalRecord) error {
@@ -436,7 +452,7 @@ func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChan
 		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to write L0 response", requestID)
 		return
 	}
-	if _, err := h.recordTerminalResult(c.Request.Context(), terminalRecord{
+	if _, terminalDegraded, err := h.recordTerminalResult(c.Request.Context(), terminalRecord{
 		EventID:      terminalEventID,
 		TurnID:       turnID,
 		RequestID:    requestID,
@@ -450,6 +466,10 @@ func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChan
 		// The upstream result already succeeded; a recording failure must not
 		// take the client's response hostage. Log it and deliver normally.
 		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
+	} else if terminalDegraded {
+		// Terminal event landed in the local buffer; keep the degradation
+		// marker on the response even if the inbound event was recorded fresh.
+		c.Header(RecordingDegradedHeader, "buffer")
 	}
 	if idempotencyKey != "" {
 		_ = h.completeIdempotency(idempotencyKey, requestID, responsePath)
@@ -491,7 +511,7 @@ func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannel
 	if streamErr != nil {
 		errorMessage = streamErr.Error()
 	}
-	terminalEventID, terminalErr := h.streamTerminalResult(c.Request.Context(), terminalRecord{
+	terminalEventID, _, terminalErr := h.streamTerminalResult(c.Request.Context(), terminalRecord{
 		EventID:      idgen.NewEventID(),
 		TurnID:       turnID,
 		RequestID:    requestID,

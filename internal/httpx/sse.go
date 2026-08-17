@@ -48,7 +48,9 @@ func (w *SSEWriter) Flush() {
 // local durable buffer. The SSE stream is already established by the time this
 // runs, so a recording failure must never interrupt the client stream — the
 // event is buffered when SQLite is unwritable, and only errRecordingUnavailable
-// (both sinks down) is surfaced here for the caller to log.
-func (h *GatewayHandler) streamTerminalResult(ctx context.Context, tr terminalRecord) (string, error) {
+// (both sinks down) is surfaced here for the caller to log. The degraded flag
+// is ignored on the streaming path because the SSE headers were already
+// flushed to the client before the terminal event is recorded.
+func (h *GatewayHandler) streamTerminalResult(ctx context.Context, tr terminalRecord) (string, bool, error) {
 	return h.recordTerminalResult(ctx, tr)
 }
