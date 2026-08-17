@@ -372,7 +372,7 @@ func CountPromotionEvidence(ctx context.Context, database *sql.DB, teamID, slug 
 			seen[id] = true
 		}
 	}
-	rows, err := database.QueryContext(ctx, `SELECT source_event_ids FROM assets WHERE team_id=? AND slug=? AND asset_type IN ('l1','l2','l3')`)
+	rows, err := database.QueryContext(ctx, `SELECT source_event_ids FROM assets WHERE team_id=? AND slug=? AND asset_type IN ('l1','l2','l3')`, teamID, slug)
 	if err != nil {
 		return 0, fmt.Errorf("count promotion evidence: %w", err)
 	}
