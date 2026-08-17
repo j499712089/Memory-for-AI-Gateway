@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"gateway/internal/adapter"
+	"gateway/internal/db"
 	"gateway/internal/hashutil"
 	"gateway/internal/idgen"
 	"gateway/internal/l0"
 	"gateway/internal/secrets"
 	"gateway/internal/turn"
+	"gateway/internal/worker"
 
 	"github.com/gin-gonic/gin"
 )
@@ -27,12 +29,23 @@ const idempotencyTTL = 24 * time.Hour
 
 var errChannelDisabled = errors.New("upstream channel is disabled")
 
+// errRecordingUnavailable is returned by the degradation gate when neither the
+// SQLite ledger nor the local durable buffer accepted an event
+// (Constitution §1: DB and local buffer both unwritable → do not forward).
+var errRecordingUnavailable = errors.New("recording unavailable")
+
 // GatewayHandler handles LLM proxy requests for three protocols.
 type GatewayHandler struct {
 	db             *sql.DB
 	secretsManager *secrets.Manager
 	memoryRoot     string
 	upstreamClient *adapter.UpstreamClient
+
+	// sqliteWriteProbe and bufferWriteProbe are test seams for the recording
+	// degradation gate. nil means the sink is considered writable; returning a
+	// non-nil error simulates a temporarily unwritable sink.
+	sqliteWriteProbe func() error
+	bufferWriteProbe func() error
 }
 
 // NewGatewayHandler creates a new gateway handler.
@@ -43,6 +56,14 @@ func NewGatewayHandler(db *sql.DB, secretsManager *secrets.Manager, memoryRoot s
 		memoryRoot:     memoryRoot,
 		upstreamClient: adapter.NewUpstreamClient(120 * time.Second),
 	}
+}
+
+// SetRecordingProbes overrides writability of the SQLite and local-buffer
+// sinks used by the dual-write degradation gate. A probe returning a non-nil
+// error makes the sink appear unwritable. Exported for tests only.
+func (h *GatewayHandler) SetRecordingProbes(sqliteWritable, bufferWritable func() error) {
+	h.sqliteWriteProbe = sqliteWritable
+	h.bufferWriteProbe = bufferWritable
 }
 
 // UpstreamChannelInfo holds the channel data required for a same-protocol request.
@@ -150,10 +171,9 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 			writeGatewayError(c, http.StatusConflict, "idempotency_conflict", "A request with this idempotency key is already recorded", existingRequestID)
 			return
 		case idempotencyNew:
-			if err := h.reserveIdempotency(idempotencyKey, requestID); err != nil {
-				writeGatewayError(c, http.StatusConflict, "idempotency_conflict", "Could not reserve idempotency key", requestID)
-				return
-			}
+			// The idempotency reservation is part of the inbound persistence
+			// gate below, so it degrades to the local buffer together with the
+			// event when SQLite is temporarily unwritable.
 		}
 	}
 
@@ -166,34 +186,26 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		conversationID = requestID
 	}
 
-	if err := turn.WriteTurnLedger(h.db, turnID, requestID, conversationID, sessionID, teamID, 1); err != nil {
-		h.releaseIdempotency(idempotencyKey, requestID)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to create turn ledger", requestID)
-		return
-	}
-
 	inboundEventID := idgen.NewEventID()
-	l0Path, contentHash, err := l0.WriteRequestFile(h.memoryRoot, turnID, inboundEventID, json.RawMessage(body))
-	if err != nil {
-		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to write L0 request", requestID)
-		return
+	inboundRecord := inboundRecord{
+		TurnID:         turnID,
+		RequestID:      requestID,
+		ConversationID: conversationID,
+		SessionID:      sessionID,
+		TeamID:         teamID,
+		EventID:        inboundEventID,
+		RequestBody:    body,
+		IdempotencyKey: idempotencyKey,
+		InjectionPkg:   injectionPkg,
+		InjectionText:  injectionText,
 	}
-
-	if _, err := turn.WriteInboundEventWithID(h.db, inboundEventID, turnID, requestID, conversationID, sessionID, teamID, contentHash, l0Path); err != nil {
+	if err := h.recordInbound(c.Request.Context(), inboundRecord); err != nil {
+		if errors.Is(err, errRecordingUnavailable) {
+			writeGatewayError(c, http.StatusInternalServerError, "recording_unavailable", "Memory recording unavailable: SQLite and local buffer are both unwritable; refusing to forward upstream", requestID)
+			return
+		}
 		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to record inbound event", requestID)
-		return
-	}
-	if err := h.registerEventFile(inboundEventID, l0Path, contentHash); err != nil {
-		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to register L0 request", requestID)
-		return
-	}
-
-	if err := h.recordInjectionSnapshot(requestID, turnID, injectionPkg, injectionText); err != nil {
-		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to record injection snapshot", requestID)
+		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to record inbound request", requestID)
 		return
 	}
 
@@ -209,6 +221,175 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 		return
 	}
 	h.forwardNonStream(c, upstreamChannel, injectedBody, protocol, upstreamKey, teamID, turnID, requestID, conversationID, sessionID, idempotencyKey)
+}
+
+// inboundRecord carries everything needed to durably record one inbound turn.
+type inboundRecord struct {
+	TurnID         string
+	RequestID      string
+	ConversationID string
+	SessionID      string
+	TeamID         string
+	EventID        string
+	RequestBody    []byte
+	IdempotencyKey string
+	InjectionPkg   adapter.InjectionPackage
+	InjectionText  string
+}
+
+// terminalRecord carries everything needed to durably record one terminal event.
+type terminalRecord struct {
+	EventID        string
+	TurnID         string
+	RequestID      string
+	ConversationID string
+	SessionID      string
+	TeamID         string
+	Status         turn.TerminalStatus
+	ErrorMsg       string
+	ContentHash    string
+	ContentPath    string
+}
+
+// recordInbound applies the dual-write degradation gate (Constitution §1.5,
+// Specify §1.5) to the inbound event: SQLite first, then the local durable
+// buffer. It returns nil as soon as either sink accepted the event. It returns
+// errRecordingUnavailable only when both sinks are unwritable — the caller
+// must then NOT forward upstream.
+func (h *GatewayHandler) recordInbound(ctx context.Context, in inboundRecord) error {
+	if h.sqliteWriteProbe == nil || h.sqliteWriteProbe() == nil {
+		if err := h.persistInboundToSQLite(ctx, in); err == nil {
+			return nil
+		}
+	}
+	// SQLite is (or appears) unwritable: drop the idempotency reservation so a
+	// retry can be re-accepted, then fall back to the local durable buffer.
+	h.releaseIdempotency(in.IdempotencyKey, in.RequestID)
+	if h.bufferWriteProbe == nil || h.bufferWriteProbe() == nil {
+		if err := h.persistInboundToBuffer(ctx, in); err == nil {
+			return nil
+		}
+	}
+	return errRecordingUnavailable
+}
+
+func (h *GatewayHandler) persistInboundToSQLite(ctx context.Context, in inboundRecord) error {
+	if in.IdempotencyKey != "" {
+		if err := h.reserveIdempotency(in.IdempotencyKey, in.RequestID); err != nil {
+			return err
+		}
+	}
+	if err := turn.WriteTurnLedger(h.db, in.TurnID, in.RequestID, in.ConversationID, in.SessionID, in.TeamID, 1); err != nil {
+		return err
+	}
+	l0Path, contentHash, err := l0.WriteRequestFile(h.memoryRoot, in.TurnID, in.EventID, json.RawMessage(in.RequestBody))
+	if err != nil {
+		return err
+	}
+	if _, err := turn.WriteInboundEventWithID(h.db, in.EventID, in.TurnID, in.RequestID, in.ConversationID, in.SessionID, in.TeamID, contentHash, l0Path); err != nil {
+		return err
+	}
+	if err := h.registerEventFile(in.EventID, l0Path, contentHash); err != nil {
+		return err
+	}
+	if err := h.recordInjectionSnapshot(in.RequestID, in.TurnID, in.InjectionPkg, in.InjectionText); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *GatewayHandler) persistInboundToBuffer(ctx context.Context, in inboundRecord) error {
+	anchor := in.IdempotencyKey
+	if anchor == "" {
+		anchor = in.RequestID
+	}
+	payload := db.BufferEventPayload{
+		BufferKey:                anchor,
+		EventID:                  in.EventID,
+		TurnID:                   in.TurnID,
+		RequestID:                in.RequestID,
+		ConversationID:           in.ConversationID,
+		SessionID:                in.SessionID,
+		TeamID:                   in.TeamID,
+		Direction:                "inbound",
+		Sequence:                 1,
+		EventType:                "inbound_persisted",
+		Status:                   "ok",
+		RequestBody:              in.RequestBody,
+		InjectionManifestVersion: in.InjectionPkg.ManifestVersion,
+		InjectionText:            in.InjectionText,
+		InjectionSources:         in.InjectionPkg.SourceEventIDs,
+	}
+	record, err := db.WriteLocalBuffer(ctx, h.db, h.memoryRoot, payload)
+	if err != nil {
+		return err
+	}
+	// Best-effort compensation job; a missing job is covered by the startup
+	// recovery pass that replays pending local_buffer rows (§1.8.3).
+	_ = worker.EnqueueBufferReplay(ctx, h.db, record.ID, in.RequestID)
+	return nil
+}
+
+// recordTerminalResult durably records a terminal event with the same
+// degradation gate as the inbound event. It never fails the client response:
+// the caller decides how to surface the error, and an upstream result that
+// already succeeded must still be delivered.
+func (h *GatewayHandler) recordTerminalResult(ctx context.Context, tr terminalRecord) (string, error) {
+	if h.sqliteWriteProbe == nil || h.sqliteWriteProbe() == nil {
+		if err := h.persistTerminalToSQLite(ctx, tr); err == nil {
+			return tr.EventID, nil
+		}
+	}
+	if h.bufferWriteProbe == nil || h.bufferWriteProbe() == nil {
+		if err := h.persistTerminalToBuffer(ctx, tr); err == nil {
+			return tr.EventID, nil
+		}
+	}
+	return "", errRecordingUnavailable
+}
+
+func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr terminalRecord) error {
+	if tr.ContentHash != "" && tr.ContentPath != "" {
+		if err := turn.SetTurnResponse(h.db, tr.TurnID, tr.ContentHash, tr.ContentPath); err != nil {
+			return err
+		}
+	}
+	if _, err := turn.WriteTerminalStatusWithID(h.db, tr.EventID, tr.TurnID, tr.RequestID, tr.ConversationID, tr.SessionID, tr.TeamID, tr.Status, tr.ErrorMsg); err != nil {
+		return err
+	}
+	if tr.ContentHash != "" && tr.ContentPath != "" {
+		_ = turn.SetEventContent(h.db, tr.EventID, tr.ContentHash, tr.ContentPath)
+		_ = h.registerEventFile(tr.EventID, tr.ContentPath, tr.ContentHash)
+	}
+	return nil
+}
+
+func (h *GatewayHandler) persistTerminalToBuffer(ctx context.Context, tr terminalRecord) error {
+	payload := db.BufferEventPayload{
+		BufferKey:      tr.RequestID,
+		EventID:        tr.EventID,
+		TurnID:         tr.TurnID,
+		RequestID:      tr.RequestID,
+		ConversationID: tr.ConversationID,
+		SessionID:      tr.SessionID,
+		TeamID:         tr.TeamID,
+		Direction:      "outbound",
+		Sequence:       1,
+		EventType:      string(tr.Status),
+		Status:         "ok",
+		ContentHash:    tr.ContentHash,
+		ContentPath:    tr.ContentPath,
+		ErrorMsg:       tr.ErrorMsg,
+	}
+	if tr.Status == turn.StatusError {
+		payload.Status = "error"
+	}
+	record, err := db.WriteLocalBuffer(ctx, h.db, h.memoryRoot, payload)
+	if err != nil {
+		return err
+	}
+	_ = worker.EnqueueBufferReplay(ctx, h.db, record.ID, tr.RequestID)
+	return nil
 }
 
 func parseInboundRequest(protocol string, body []byte) (*adapter.InboundTurn, error) {
@@ -255,17 +436,20 @@ func (h *GatewayHandler) forwardNonStream(c *gin.Context, upstream *UpstreamChan
 		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to write L0 response", requestID)
 		return
 	}
-	if err := turn.SetTurnResponse(h.db, turnID, responseHash, responsePath); err != nil {
+	if _, err := h.recordTerminalResult(c.Request.Context(), terminalRecord{
+		EventID:      terminalEventID,
+		TurnID:       turnID,
+		RequestID:    requestID,
+		ConversationID: conversationID,
+		SessionID:    sessionID,
+		TeamID:       teamID,
+		Status:       turn.StatusComplete,
+		ContentHash:  responseHash,
+		ContentPath:  responsePath,
+	}); err != nil {
+		// The upstream result already succeeded; a recording failure must not
+		// take the client's response hostage. Log it and deliver normally.
 		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to record L0 response", requestID)
-		return
-	}
-	if _, err := turn.WriteTerminalStatusWithID(h.db, terminalEventID, turnID, requestID, conversationID, sessionID, teamID, turn.StatusComplete, ""); err != nil {
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to record completion", requestID)
-		return
-	}
-	if err := turn.SetEventContent(h.db, terminalEventID, responseHash, responsePath); err == nil {
-		_ = h.registerEventFile(terminalEventID, responsePath, responseHash)
 	}
 	if idempotencyKey != "" {
 		_ = h.completeIdempotency(idempotencyKey, requestID, responsePath)
@@ -293,10 +477,12 @@ func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannel
 		writeGatewayError(c, http.StatusBadGateway, "upstream_error", "Upstream returned no stream", requestID)
 		return
 	}
+	// response_started is an intermediate event. When SQLite is unwritable the
+	// stream continues anyway and the terminal status is buffered by
+	// recordTerminalResult below; killing the stream would lose the upstream
+	// result without improving durability.
 	if err := turn.WriteResponseStartedEvent(h.db, turnID, requestID, conversationID, sessionID, teamID); err != nil {
 		h.recordFailure(turnID, requestID, conversationID, sessionID, teamID, err.Error(), false)
-		writeGatewayError(c, http.StatusInternalServerError, "recording_error", "Failed to start stream recording", requestID)
-		return
 	}
 
 	streamTee := adapter.NewStreamTee(resp.BodyStream, NewSSEWriter(c), h.db, h.memoryRoot, turnID, requestID, conversationID, sessionID, teamID)
@@ -305,7 +491,16 @@ func (h *GatewayHandler) forwardStream(c *gin.Context, upstream *UpstreamChannel
 	if streamErr != nil {
 		errorMessage = streamErr.Error()
 	}
-	terminalEventID, terminalErr := turn.WriteTerminalStatusWithID(h.db, idgen.NewEventID(), turnID, requestID, conversationID, sessionID, teamID, terminalStatus, errorMessage)
+	terminalEventID, terminalErr := h.streamTerminalResult(c.Request.Context(), terminalRecord{
+		EventID:      idgen.NewEventID(),
+		TurnID:       turnID,
+		RequestID:    requestID,
+		ConversationID: conversationID,
+		SessionID:    sessionID,
+		TeamID:       teamID,
+		Status:       terminalStatus,
+		ErrorMsg:     errorMessage,
+	})
 	if terminalErr == nil && terminalStatus == turn.StatusError {
 		_ = turn.EnqueueOutbox(h.db, requestID, terminalEventID, map[string]string{
 			"turn_id": turnID,

@@ -1,6 +1,8 @@
 package httpx
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -39,4 +41,14 @@ func (w *SSEWriter) Write(data []byte) (int, error) {
 // Flush flushes the SSE stream
 func (w *SSEWriter) Flush() {
 	w.ctx.Writer.Flush()
+}
+
+// streamTerminalResult applies the same dual-write degradation gate
+// (Constitution §1.5) to a streaming terminal event: SQLite first, then the
+// local durable buffer. The SSE stream is already established by the time this
+// runs, so a recording failure must never interrupt the client stream — the
+// event is buffered when SQLite is unwritable, and only errRecordingUnavailable
+// (both sinks down) is surfaced here for the caller to log.
+func (h *GatewayHandler) streamTerminalResult(ctx context.Context, tr terminalRecord) (string, error) {
+	return h.recordTerminalResult(ctx, tr)
 }
