@@ -10,13 +10,14 @@ import (
 )
 
 // SetupRouter configures the HTTP router with all endpoints
-func SetupRouter(db *sql.DB, secretsManager *secrets.Manager) *gin.Engine {
+func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string) *gin.Engine {
 	// Create router
 	r := gin.Default()
 
 	// Create handlers
 	healthHandler := NewHealthHandler(db)
 	adminHandler := NewAdminHandler(db, secretsManager)
+	gatewayHandler := NewGatewayHandler(db, secretsManager, memoryRoot)
 
 	// Create auth middleware
 	authMgr := auth.NewMiddleware(db)
@@ -36,6 +37,25 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager) *gin.Engine {
 		// API Keys
 		api.GET("/api-keys", adminHandler.HandleListAPIKeys)
 		api.POST("/api-keys", adminHandler.HandleCreateAPIKey)
+	}
+
+	// Gateway LLM endpoints (requires auth + idempotency)
+	gateway := r.Group("")
+	gateway.Use(AuthMiddleware(authMgr))
+	gateway.Use(IdempotencyMiddleware(db))
+	{
+		// Anthropic Messages
+		gateway.POST("/claude-code/:channel/v1/messages", gatewayHandler.HandleAnthropicMessages)
+		gateway.POST("/v1/messages", gatewayHandler.HandleAnthropicMessages)
+
+		// Chat Completions
+		gateway.POST("/codebuddy/:channel/v1/chat/completions", gatewayHandler.HandleChatCompletions)
+
+		// Responses
+		gateway.POST("/codex/:channel/v1/responses", gatewayHandler.HandleResponses)
+
+		// DSH (defaults to chat_completions)
+		gateway.POST("/dsh/:channel/v1/chat/completions", gatewayHandler.HandleChatCompletions)
 	}
 
 	return r

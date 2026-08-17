@@ -91,3 +91,35 @@ func GetAPIKeyID(c *gin.Context) (string, bool) {
 	}
 	return apiKeyID.(string), true
 }
+
+// IdempotencyMiddleware checks for duplicate requests using Idempotency-Key header
+// Phase 2: Basic implementation that checks idempotency_keys table
+func IdempotencyMiddleware(db interface{}) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Get idempotency key from header
+		idempotencyKey := c.GetHeader("Idempotency-Key")
+		if idempotencyKey == "" {
+			// Also check lowercase variant used by Responses protocol
+			idempotencyKey = c.GetHeader("idempotency-key")
+		}
+
+		if idempotencyKey != "" {
+			// Store in context for later use by handler
+			c.Set("idempotency_key", idempotencyKey)
+
+			// Phase 2: Basic check - actual idempotency logic will be in gateway handler
+			// This middleware just extracts and stores the key
+		}
+
+		c.Next()
+	}
+}
+
+// GetIdempotencyKey retrieves the idempotency_key from the context
+func GetIdempotencyKey(c *gin.Context) (string, bool) {
+	key, exists := c.Get("idempotency_key")
+	if !exists {
+		return "", false
+	}
+	return key.(string), true
+}

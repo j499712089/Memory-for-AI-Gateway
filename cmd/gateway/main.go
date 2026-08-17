@@ -77,8 +77,11 @@ func main() {
 	// TODO: Import models into upstream_channels table
 	// This will be implemented in the admin handler
 
+	// Determine memory root from database path
+	memoryRoot := filepath.Dir(filepath.Dir(cfg.Database.GlobalDBPath))
+
 	// Setup HTTP router
-	router := httpx.SetupRouter(database.Global, secretsManager)
+	router := httpx.SetupRouter(database.Global, secretsManager, memoryRoot)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
