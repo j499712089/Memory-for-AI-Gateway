@@ -253,8 +253,11 @@ func replayTerminalEvent(ctx context.Context, database *sql.DB, payload db.Buffe
 		if payload.ContentHash != "" && payload.ContentPath != "" {
 			_ = turn.SetEventContent(database, payload.EventID, payload.ContentHash, payload.ContentPath)
 		}
+		// Keep the in-memory status in sync with the terminal just written so a
+		// buffered complete event can enqueue its refine job in this pass.
+		finalStatus = sql.NullString{Valid: true, String: string(status)}
 	}
-	if turn.TerminalStatus(payload.EventType) != turn.StatusComplete {
+	if !finalStatus.Valid || finalStatus.String != string(turn.StatusComplete) {
 		return nil
 	}
 	return enqueueBufferedL1Refine(ctx, database, payload)

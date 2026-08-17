@@ -22,9 +22,9 @@ var (
 	// These patterns cover provider keys commonly pasted into a conversation
 	// and key-value credentials. Redaction happens before facts reach a queue,
 	// database or vault.
-	secretTokenPattern    = regexp.MustCompile(`(?i)\b(?:sk|rk|ghp|github_pat|xox[baprs]-)[A-Za-z0-9_-]{8,}`)
-	bearerTokenPattern    = regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{8,}`)
-	assignedSecretPattern = regexp.MustCompile(`(?i)(\b(?:key|api[ _-]?key|secret(?:[ _-]?key)?|access[ _-]?token|auth(?:orization)?|password)\b\s*[:=]\s*["']?)[A-Za-z0-9._~+/=-]{8,}`)
+	secretTokenPattern    = regexp.MustCompile(`(?i)\b(?:sk|rk|ghp|github_pat|xox[baprs]-)[A-Za-z0-9_-]{4,}`)
+	bearerTokenPattern    = regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{4,}`)
+	assignedSecretPattern = regexp.MustCompile(`(?i)(\b(?:key|api[ _-]?key|secret(?:[ _-]?key)?|access[ _-]?token|auth(?:orization)?|password)\b\s*[:=]\s*["']?)[A-Za-z0-9._~+/=-]{4,}`)
 )
 
 // AssetWorkerDeps bundles the dependencies shared by the six Phase 3b asset
@@ -385,7 +385,7 @@ func routeRefinedAssets(ctx context.Context, teamDB *sql.DB, queue *Queue, deps 
 		// Two distinct source events (inbound + terminal) satisfy the evidence
 		// gate for an initial promotion. Identity/principle facts advance to
 		// their corresponding layer; ordinary facts remain conservative L2.
-		if len(payload.SourceEventIDs) >= PromotionGate {
+		if len(uniqueSourceEventIDs(payload.SourceEventIDs)) >= PromotionGate {
 			layer := "l2"
 			switch fact.Category {
 			case "identity":
@@ -467,6 +467,22 @@ func routeRefinedAssets(ctx context.Context, teamDB *sql.DB, queue *Queue, deps 
 		}
 	}
 	return nil
+}
+
+func uniqueSourceEventIDs(sourceIDs []string) []string {
+	seen := make(map[string]struct{}, len(sourceIDs))
+	unique := make([]string, 0, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		if strings.TrimSpace(sourceID) == "" {
+			continue
+		}
+		if _, ok := seen[sourceID]; ok {
+			continue
+		}
+		seen[sourceID] = struct{}{}
+		unique = append(unique, sourceID)
+	}
+	return unique
 }
 
 func enqueueUniqueJob(ctx context.Context, queue *Queue, job Job) (string, error) {
