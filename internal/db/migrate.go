@@ -6,7 +6,13 @@ import (
 	"os"
 )
 
-// Migrate runs database migrations
+// Migrate runs database migrations.
+//
+// schema.sql is fully idempotent (every statement is CREATE TABLE/INDEX IF NOT
+// EXISTS), so it is applied on every startup. This backfills tables added after
+// a database was first created — an older database that already recorded the
+// 'initial' version still picks up new tables (e.g. channel_aliases) on its
+// next boot without a destructive re-migration.
 func Migrate(db *sql.DB, schemaPath string) error {
 	// Check if schema_migrations table exists
 	var tableName string
@@ -28,24 +34,13 @@ func Migrate(db *sql.DB, schemaPath string) error {
 		}
 	}
 
-	// Check if migration already applied
-	var version string
-	err = db.QueryRow("SELECT version FROM schema_migrations WHERE version = 'initial'").Scan(&version)
-	if err == nil {
-		// Migration already applied
-		return nil
-	}
-	if err != sql.ErrNoRows {
-		return fmt.Errorf("failed to check migration status: %w", err)
-	}
-
 	// Read schema file
 	schema, err := os.ReadFile(schemaPath)
 	if err != nil {
 		return fmt.Errorf("failed to read schema file: %w", err)
 	}
 
-	// Execute schema in a transaction
+	// Execute schema in a transaction. Idempotent by design (see above).
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -57,8 +52,9 @@ func Migrate(db *sql.DB, schemaPath string) error {
 		return fmt.Errorf("failed to execute schema: %w", err)
 	}
 
-	// Record migration
-	if _, err := tx.Exec("INSERT INTO schema_migrations (version) VALUES ('initial')"); err != nil {
+	// Record the initial migration idempotently. A database that already has
+	// the 'initial' version simply ignores this insert.
+	if _, err := tx.Exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('initial')"); err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
 

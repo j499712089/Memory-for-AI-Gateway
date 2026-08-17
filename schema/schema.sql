@@ -135,6 +135,26 @@ CREATE INDEX IF NOT EXISTS idx_upstream_team_proto ON upstream_channels(team_id,
 CREATE INDEX IF NOT EXISTS idx_upstream_enabled   ON upstream_channels(enabled, priority);
 
 -- ----------------------------------------------------------------------------
+-- 4b. 通道别名（协议感知的通道映射）
+-- 同一客户端通道名在不同协议下可映射到不同的上游通道。用于解决运行时
+-- 固定通道名（如 Codex Runtime 固定使用 "default"）与数据库通道协议不匹配
+-- 的问题：当客户端以协议 P 请求通道名 N 时，若 N 的存储协议不是 P，则通过
+-- (team_id, alias_name=N, protocol=P) 解析到真正支持 P 的目标通道。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS channel_aliases (
+    id                TEXT PRIMARY KEY,
+    team_id           TEXT REFERENCES teams(id),
+    alias_name        TEXT NOT NULL,        -- 客户端使用的通道名（如 default）
+    protocol          TEXT NOT NULL CHECK (protocol IN
+                          ('anthropic_messages','chat_completions','responses')),
+    target_channel_id TEXT NOT NULL REFERENCES upstream_channels(id),
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (team_id, alias_name, protocol)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_alias_lookup ON channel_aliases(team_id, alias_name, protocol);
+
+-- ----------------------------------------------------------------------------
 -- 5. 会话与会话绑定
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS sessions (

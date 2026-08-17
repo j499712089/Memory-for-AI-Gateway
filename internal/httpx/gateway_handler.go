@@ -137,7 +137,7 @@ func (h *GatewayHandler) handleProtocolRequest(c *gin.Context, protocol string) 
 	idempotencyKey := idempotencyKeyForRequest(c, body, protocol)
 	c.Header("X-Request-ID", requestID)
 
-	upstreamChannel, err := h.getUpstreamChannel(teamID, channelName)
+	upstreamChannel, err := h.getUpstreamChannel(teamID, channelName, protocol)
 	if err != nil {
 		if errors.Is(err, errChannelDisabled) {
 			writeGatewayError(c, http.StatusServiceUnavailable, "channel_disabled", "Upstream channel is disabled", requestID)
@@ -564,7 +564,45 @@ func (h *GatewayHandler) upstreamRequest(channel *UpstreamChannelInfo, body []by
 	}
 }
 
-func (h *GatewayHandler) getUpstreamChannel(teamID, channelName string) (*UpstreamChannelInfo, error) {
+// getUpstreamChannel resolves a client-facing channel name plus the requested
+// protocol to a usable upstream channel. Resolution order:
+//
+//  1. Direct name match whose stored protocol equals the requested protocol.
+//  2. Protocol-aware alias (channel_aliases) — used when a client runtime uses
+//     a fixed channel name whose stored protocol differs from the route's
+//     protocol (e.g. Codex Runtime always requests channel "default").
+//
+// Original error semantics are preserved: disabled → errChannelDisabled (503),
+// not found → wrapped error (404), and a protocol mismatch with no alias is
+// returned to the caller so it can report protocol_mismatch (400).
+func (h *GatewayHandler) getUpstreamChannel(teamID, channelName, protocol string) (*UpstreamChannelInfo, error) {
+	channel, enabled, err := h.lookupChannelByName(teamID, channelName)
+	switch {
+	case err == nil && enabled == 1 && channel.Protocol == protocol:
+		return channel, nil
+	case err == nil && enabled != 1:
+		return nil, errChannelDisabled
+	case err == nil:
+		// Channel exists and is enabled but its stored protocol differs from the
+		// requested protocol. Try a protocol-aware alias before reporting it.
+		if target := h.lookupChannelAlias(teamID, channelName, protocol); target != nil {
+			return target, nil
+		}
+		return channel, nil
+	case errors.Is(err, sql.ErrNoRows):
+		// No direct channel; a protocol-aware alias may still resolve it.
+		if target := h.lookupChannelAlias(teamID, channelName, protocol); target != nil {
+			return target, nil
+		}
+		return nil, fmt.Errorf("query upstream channel: %w", err)
+	default:
+		return nil, fmt.Errorf("query upstream channel: %w", err)
+	}
+}
+
+// lookupChannelByName returns the highest-priority enabled-or-disabled channel
+// matching (teamID, name), plus its enabled flag.
+func (h *GatewayHandler) lookupChannelByName(teamID, channelName string) (*UpstreamChannelInfo, int, error) {
 	var channel UpstreamChannelInfo
 	var enabled int
 	err := h.db.QueryRow(`
@@ -578,12 +616,47 @@ func (h *GatewayHandler) getUpstreamChannel(teamID, channelName string) (*Upstre
 		&channel.APIKeyRef, &channel.FailoverChannelID, &enabled,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query upstream channel: %w", err)
+		return nil, 0, err
 	}
-	if enabled != 1 {
-		return nil, errChannelDisabled
+	return &channel, enabled, nil
+}
+
+// lookupChannelAlias resolves a protocol-aware channel alias to a usable target
+// channel. It returns nil when no alias exists for (team, aliasName, protocol)
+// or when the target is unusable (missing, disabled, or wrong protocol).
+func (h *GatewayHandler) lookupChannelAlias(teamID, aliasName, protocol string) *UpstreamChannelInfo {
+	var targetID string
+	err := h.db.QueryRow(`
+		SELECT target_channel_id
+		FROM channel_aliases
+		WHERE team_id = ? AND alias_name = ? AND protocol = ?
+	`, teamID, aliasName, protocol).Scan(&targetID)
+	if err != nil {
+		return nil
 	}
-	return &channel, nil
+	channel, enabled, err := h.lookupChannelByID(targetID)
+	if err != nil || enabled != 1 || channel.Protocol != protocol {
+		return nil
+	}
+	return channel
+}
+
+// lookupChannelByID returns a channel by primary key, plus its enabled flag.
+func (h *GatewayHandler) lookupChannelByID(channelID string) (*UpstreamChannelInfo, int, error) {
+	var channel UpstreamChannelInfo
+	var enabled int
+	err := h.db.QueryRow(`
+		SELECT id, name, protocol, base_url, model, api_key_ref, COALESCE(failover_channel_id, ''), enabled
+		FROM upstream_channels
+		WHERE id = ?
+	`, channelID).Scan(
+		&channel.ID, &channel.Name, &channel.Protocol, &channel.BaseURL, &channel.Model,
+		&channel.APIKeyRef, &channel.FailoverChannelID, &enabled,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &channel, enabled, nil
 }
 
 func (h *GatewayHandler) getFailoverChannel(teamID, channelID string) (*UpstreamChannelInfo, error) {
