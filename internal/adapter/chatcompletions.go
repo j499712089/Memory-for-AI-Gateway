@@ -19,11 +19,11 @@ type ChatCompletionsRequest struct {
 
 // ChatMessage represents a chat message
 type ChatMessage struct {
-	Role       string          `json:"role"` // system|user|assistant|tool
-	Content    any             `json:"content,omitempty"` // string or array
+	Role       string            `json:"role"`              // system|user|assistant|tool
+	Content    any               `json:"content,omitempty"` // string or array
 	ToolCalls  []json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Name       string            `json:"name,omitempty"`
 }
 
 // ParseChatCompletionsRequest parses a Chat Completions request
@@ -87,16 +87,29 @@ func InjectChatCompletionsSystem(req *ChatCompletionsRequest, injectionText stri
 
 // BuildChatCompletionsUpstreamRequest builds the upstream request with injection
 func BuildChatCompletionsUpstreamRequest(originalBody []byte, injectionText string) ([]byte, error) {
-	var req ChatCompletionsRequest
-	if err := json.Unmarshal(originalBody, &req); err != nil {
-		return nil, fmt.Errorf("unmarshal request: %w", err)
+	request, err := decodeRequestObject(originalBody)
+	if err != nil {
+		return nil, err
 	}
 
-	// Inject system message at head
-	if err := InjectChatCompletionsSystem(&req, injectionText); err != nil {
-		return nil, fmt.Errorf("inject system: %w", err)
+	messagesJSON, ok := request["messages"]
+	if !ok {
+		return nil, fmt.Errorf("messages is required")
 	}
 
-	// Marshal back to JSON
-	return json.Marshal(req)
+	var messages []json.RawMessage
+	if err := json.Unmarshal(messagesJSON, &messages); err != nil {
+		return nil, fmt.Errorf("unmarshal messages: %w", err)
+	}
+
+	injectionJSON, err := json.Marshal(ChatMessage{Role: "system", Content: injectionText})
+	if err != nil {
+		return nil, fmt.Errorf("marshal injection message: %w", err)
+	}
+	request["messages"], err = json.Marshal(append([]json.RawMessage{injectionJSON}, messages...))
+	if err != nil {
+		return nil, fmt.Errorf("marshal messages: %w", err)
+	}
+
+	return json.Marshal(request)
 }

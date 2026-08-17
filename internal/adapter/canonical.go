@@ -1,6 +1,9 @@
 package adapter
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // InboundTurn represents a normalized incoming request across all three protocols
 type InboundTurn struct {
@@ -59,4 +62,22 @@ type InjectionPackage struct {
 	SourceEventIDs  []string // Traceability
 	ManifestVersion string
 	Truncated       bool // Set if token budget exceeded
+}
+
+// decodeRequestObject retains every protocol-specific field as raw JSON. The
+// adapter only replaces the protocol's injection field before forwarding.
+func decodeRequestObject(body []byte) (map[string]json.RawMessage, error) {
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("request body is not valid JSON")
+	}
+
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, fmt.Errorf("decode request object: %w", err)
+	}
+	if request == nil {
+		return nil, fmt.Errorf("request body must be a JSON object")
+	}
+
+	return request, nil
 }

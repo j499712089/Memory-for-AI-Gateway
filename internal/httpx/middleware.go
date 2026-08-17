@@ -1,7 +1,9 @@
 package httpx
 
 import (
+	"database/sql"
 	"net/http"
+	"time"
 
 	"gateway/internal/auth"
 
@@ -92,10 +94,14 @@ func GetAPIKeyID(c *gin.Context) (string, bool) {
 	return apiKeyID.(string), true
 }
 
-// IdempotencyMiddleware checks for duplicate requests using Idempotency-Key header
-// Phase 2: Basic implementation that checks idempotency_keys table
-func IdempotencyMiddleware(db interface{}) gin.HandlerFunc {
+// IdempotencyMiddleware extracts the HTTP idempotency key and removes expired
+// reservations. The handler performs body-aware conflict detection and replay.
+func IdempotencyMiddleware(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if db != nil {
+			_, _ = db.Exec("DELETE FROM idempotency_keys WHERE expires_at <= ?", time.Now().UTC().Format(time.RFC3339Nano))
+		}
+
 		// Get idempotency key from header
 		idempotencyKey := c.GetHeader("Idempotency-Key")
 		if idempotencyKey == "" {
@@ -107,8 +113,6 @@ func IdempotencyMiddleware(db interface{}) gin.HandlerFunc {
 			// Store in context for later use by handler
 			c.Set("idempotency_key", idempotencyKey)
 
-			// Phase 2: Basic check - actual idempotency logic will be in gateway handler
-			// This middleware just extracts and stores the key
 		}
 
 		c.Next()

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -16,7 +17,7 @@ func RegisterEventFile(db *sql.DB, eventID, filePath string, fileSize int64, fil
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	_, err := db.Exec(`
-		INSERT INTO event_files (event_id, file_path, file_hash, size_bytes, written_at)
+		INSERT OR IGNORE INTO event_files (event_id, file_path, file_hash, size_bytes, written_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, eventID, filePath, fileHash, fileSize, now)
 
@@ -83,7 +84,7 @@ func ScanInconsistentFiles(db *sql.DB, memoryRoot string) ([]string, error) {
 			return nil, fmt.Errorf("scan row: %w", err)
 		}
 
-		fullPath := memoryRoot + "/" + filePath
+		fullPath := filepath.Join(memoryRoot, filePath)
 		matches, err := VerifyFileHash(fullPath, fileHash)
 		if err != nil {
 			return nil, fmt.Errorf("verify hash for %s: %w", filePath, err)

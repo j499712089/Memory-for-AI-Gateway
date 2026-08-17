@@ -7,16 +7,16 @@ import (
 
 // AnthropicRequest represents an Anthropic Messages API request
 type AnthropicRequest struct {
-	Model         string          `json:"model"`
-	MaxTokens     int             `json:"max_tokens"`
-	System        json.RawMessage `json:"system,omitempty"` // string or array
+	Model         string            `json:"model"`
+	MaxTokens     int               `json:"max_tokens"`
+	System        json.RawMessage   `json:"system,omitempty"` // string or array
 	Messages      []json.RawMessage `json:"messages"`
 	Tools         []json.RawMessage `json:"tools,omitempty"`
-	Stream        bool            `json:"stream,omitempty"`
-	StopSequences []string        `json:"stop_sequences,omitempty"`
-	Temperature   *float64        `json:"temperature,omitempty"`
-	TopP          *float64        `json:"top_p,omitempty"`
-	TopK          *int            `json:"top_k,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
+	StopSequences []string          `json:"stop_sequences,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	TopP          *float64          `json:"top_p,omitempty"`
+	TopK          *int              `json:"top_k,omitempty"`
 }
 
 // AnthropicSystemBlock represents a system content block
@@ -79,7 +79,7 @@ func InjectAnthropicSystem(req *AnthropicRequest, injectionText string) error {
 	}
 
 	// Handle different system formats
-	if len(req.System) == 0 {
+	if len(req.System) == 0 || string(req.System) == "null" {
 		// No existing system, create array with injection
 		systemArray := []json.RawMessage{injectionJSON}
 		req.System, err = json.Marshal(systemArray)
@@ -117,16 +117,16 @@ func InjectAnthropicSystem(req *AnthropicRequest, injectionText string) error {
 
 // BuildAnthropicUpstreamRequest builds the upstream request with injection
 func BuildAnthropicUpstreamRequest(originalBody []byte, injectionText string) ([]byte, error) {
-	var req AnthropicRequest
-	if err := json.Unmarshal(originalBody, &req); err != nil {
-		return nil, fmt.Errorf("unmarshal request: %w", err)
+	request, err := decodeRequestObject(originalBody)
+	if err != nil {
+		return nil, err
 	}
 
-	// Inject system content
+	req := AnthropicRequest{System: request["system"]}
 	if err := InjectAnthropicSystem(&req, injectionText); err != nil {
 		return nil, fmt.Errorf("inject system: %w", err)
 	}
+	request["system"] = req.System
 
-	// Marshal back to JSON
-	return json.Marshal(req)
+	return json.Marshal(request)
 }

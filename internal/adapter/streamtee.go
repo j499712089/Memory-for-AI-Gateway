@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"gateway/internal/hashutil"
@@ -16,17 +17,19 @@ import (
 // StreamTee intercepts SSE responses byte-by-byte
 // Passes through to client while buffering for checkpoints
 type StreamTee struct {
-	upstream      io.ReadCloser
-	downstream    io.Writer
-	db            *sql.DB
-	memoryRoot    string
-	turnID        string
-	requestID     string
+	upstream       io.ReadCloser
+	downstream     io.Writer
+	db             *sql.DB
+	memoryRoot     string
+	turnID         string
+	requestID      string
 	conversationID string
-	sessionID     string
-	teamID        string
+	sessionID      string
+	teamID         string
 
-	buffer        bytes.Buffer
+	mu             sync.Mutex
+	checkpointMu   sync.Mutex
+	buffer         bytes.Buffer
 	lastCheckpoint time.Time
 	checkpointSeq  int
 	totalBytes     int64
@@ -75,17 +78,22 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 			if n > 0 {
 				// Write to downstream (client)
 				if _, writeErr := st.downstream.Write(buf[:n]); writeErr != nil {
+					st.mu.Lock()
 					st.disconnected = true
+					st.mu.Unlock()
 					done <- fmt.Errorf("downstream write: %w", writeErr)
 					return
 				}
 
 				// Buffer for checkpoint
+				st.mu.Lock()
 				st.buffer.Write(buf[:n])
 				st.totalBytes += int64(n)
+				shouldCheckpoint := st.buffer.Len() >= 4096
+				st.mu.Unlock()
 
 				// Check if buffer exceeds 4KB
-				if st.buffer.Len() >= 4096 {
+				if shouldCheckpoint {
 					if cpErr := st.writeCheckpoint(); cpErr != nil {
 						// Log but don't fail stream
 						fmt.Printf("checkpoint error: %v\n", cpErr)
@@ -110,12 +118,12 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 		case err := <-done:
 			// Stream finished
 			// Write final checkpoint if buffer has data
-			if st.buffer.Len() > 0 {
+			if st.hasBufferedData() {
 				st.writeCheckpoint()
 			}
 
 			if err != nil {
-				if st.disconnected {
+				if st.isDisconnected() {
 					return turn.StatusPartial, err
 				}
 				return turn.StatusError, err
@@ -124,7 +132,7 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 
 		case <-ticker.C:
 			// Time-based checkpoint (1 second)
-			if st.buffer.Len() > 0 && time.Since(st.lastCheckpoint) >= 1*time.Second {
+			if st.checkpointDue() {
 				if err := st.writeCheckpoint(); err != nil {
 					fmt.Printf("checkpoint error: %v\n", err)
 				}
@@ -135,14 +143,22 @@ func (st *StreamTee) Stream() (turn.TerminalStatus, error) {
 
 // writeCheckpoint writes buffered deltas to checkpoint file and database
 func (st *StreamTee) writeCheckpoint() error {
+	st.checkpointMu.Lock()
+	defer st.checkpointMu.Unlock()
+
+	st.mu.Lock()
 	if st.buffer.Len() == 0 {
+		st.mu.Unlock()
 		return nil
 	}
+	checkpointData := append([]byte(nil), st.buffer.Bytes()...)
+	st.buffer.Reset()
+	st.mu.Unlock()
 
 	// Write checkpoint file
-	checkpointData := st.buffer.Bytes()
 	_, err := l0.WriteCheckpointFile(st.memoryRoot, st.turnID, checkpointData)
 	if err != nil {
+		st.restoreBufferedData(checkpointData)
 		return fmt.Errorf("write checkpoint file: %w", err)
 	}
 
@@ -161,18 +177,48 @@ func (st *StreamTee) writeCheckpoint() error {
 		st.checkpointSeq,
 	)
 	if err != nil {
+		st.restoreBufferedData(checkpointData)
 		return fmt.Errorf("write checkpoint event: %w", err)
 	}
 
-	// Reset buffer and update state
-	st.buffer.Reset()
+	st.mu.Lock()
 	st.lastCheckpoint = time.Now()
 	st.checkpointSeq++
+	st.mu.Unlock()
 
 	return nil
 }
 
 // GetTotalBytes returns total bytes streamed
 func (st *StreamTee) GetTotalBytes() int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	return st.totalBytes
+}
+
+func (st *StreamTee) hasBufferedData() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.buffer.Len() > 0
+}
+
+func (st *StreamTee) checkpointDue() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.buffer.Len() > 0 && time.Since(st.lastCheckpoint) >= time.Second
+}
+
+func (st *StreamTee) restoreBufferedData(data []byte) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	current := append([]byte(nil), st.buffer.Bytes()...)
+	st.buffer.Reset()
+	st.buffer.Write(data)
+	st.buffer.Write(current)
+}
+
+func (st *StreamTee) isDisconnected() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.disconnected
 }

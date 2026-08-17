@@ -19,9 +19,9 @@ type UpstreamClient struct {
 // NewUpstreamClient creates a new upstream client
 func NewUpstreamClient(timeout time.Duration) *UpstreamClient {
 	return &UpstreamClient{
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		// Request deadlines are enforced by the caller's context. A client-wide
+		// timeout would terminate otherwise healthy long-lived SSE responses.
+		httpClient: &http.Client{},
 		timeout:    timeout,
 		maxRetries: 3,
 	}
@@ -29,12 +29,12 @@ func NewUpstreamClient(timeout time.Duration) *UpstreamClient {
 
 // UpstreamRequest represents an upstream API request
 type UpstreamRequest struct {
-	URL         string
-	Method      string
-	Headers     map[string]string
-	Body        []byte
-	Stream      bool
-	Protocol    string
+	URL      string
+	Method   string
+	Headers  map[string]string
+	Body     []byte
+	Stream   bool
+	Protocol string
 }
 
 // UpstreamResponse represents an upstream API response
@@ -49,6 +49,7 @@ type UpstreamResponse struct {
 // Send sends a request to upstream with retry logic
 func (c *UpstreamClient) Send(ctx context.Context, req *UpstreamRequest) (*UpstreamResponse, error) {
 	var lastErr error
+	var lastResp *UpstreamResponse
 
 	for attempt := 0; attempt < c.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -67,6 +68,7 @@ func (c *UpstreamClient) Send(ctx context.Context, req *UpstreamRequest) (*Upstr
 		}
 
 		lastErr = err
+		lastResp = resp
 
 		// Don't retry on client errors (4xx)
 		if resp != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -74,7 +76,7 @@ func (c *UpstreamClient) Send(ctx context.Context, req *UpstreamRequest) (*Upstr
 		}
 	}
 
-	return nil, fmt.Errorf("upstream request failed after %d attempts: %w", c.maxRetries, lastErr)
+	return lastResp, fmt.Errorf("upstream request failed after %d attempts: %w", c.maxRetries, lastErr)
 }
 
 // doRequest performs a single upstream request
@@ -107,7 +109,21 @@ func (c *UpstreamClient) doRequest(ctx context.Context, req *UpstreamRequest) (*
 		Stream:     req.Stream,
 	}
 
-	// Handle streaming response
+	// Upstream errors must be observed before a stream is handed to the caller.
+	if httpResp.StatusCode >= http.StatusBadRequest {
+		body, readErr := io.ReadAll(httpResp.Body)
+		closeErr := httpResp.Body.Close()
+		resp.Body = body
+		if readErr != nil {
+			return resp, fmt.Errorf("read upstream error body: %w", readErr)
+		}
+		if closeErr != nil {
+			return resp, fmt.Errorf("close upstream error body: %w", closeErr)
+		}
+		return resp, fmt.Errorf("upstream error: status %d, body: %s", httpResp.StatusCode, string(body))
+	}
+
+	// Handle streaming response after the status has been checked.
 	if req.Stream {
 		resp.BodyStream = httpResp.Body
 		return resp, nil
@@ -121,11 +137,6 @@ func (c *UpstreamClient) doRequest(ctx context.Context, req *UpstreamRequest) (*
 	}
 
 	resp.Body = body
-
-	// Check for HTTP errors
-	if httpResp.StatusCode >= 400 {
-		return resp, fmt.Errorf("upstream error: status %d, body: %s", httpResp.StatusCode, string(body))
-	}
 
 	return resp, nil
 }

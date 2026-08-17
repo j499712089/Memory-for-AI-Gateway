@@ -12,6 +12,39 @@ import (
 	"gateway/internal/paths"
 )
 
+func marshalJSONRecord(value any) ([]byte, error) {
+	switch raw := value.(type) {
+	case json.RawMessage:
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("raw JSON record is invalid")
+		}
+		return append([]byte(nil), raw...), nil
+	case []byte:
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("raw JSON record is invalid")
+		}
+		return append([]byte(nil), raw...), nil
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
+}
+
+func writeAtomically(finalPath string, data []byte) error {
+	tmpPath := finalPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("atomic rename: %w", err)
+	}
+	return nil
+}
+
 // WriteRequestFile writes an L0 request file atomically
 // Uses .tmp + atomic rename pattern
 func WriteRequestFile(memoryRoot, turnID, eventID string, requestData any) (string, string, error) {
@@ -31,23 +64,15 @@ func WriteRequestFile(memoryRoot, turnID, eventID string, requestData any) (stri
 
 	filename := fmt.Sprintf("%s-request-%s.jsonl", turnID, eventID)
 	finalPath := filepath.Join(dir, filename)
-	tmpPath := finalPath + ".tmp"
 
-	// Marshal to JSON
-	data, err := json.Marshal(requestData)
+	// Keep a raw protocol request byte-for-byte when one is supplied.
+	data, err := marshalJSONRecord(requestData)
 	if err != nil {
 		return "", "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	// Write to temp file
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return "", "", fmt.Errorf("write temp file: %w", err)
-	}
-
-	// Atomic rename
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath) // Cleanup temp file on failure
-		return "", "", fmt.Errorf("atomic rename: %w", err)
+	if err := writeAtomically(finalPath, data); err != nil {
+		return "", "", fmt.Errorf("write request: %w", err)
 	}
 
 	// Calculate content hash
@@ -75,20 +100,14 @@ func WriteResponseFile(memoryRoot, turnID, eventID string, responseData any) (st
 
 	filename := fmt.Sprintf("%s-response-%s.jsonl", turnID, eventID)
 	finalPath := filepath.Join(dir, filename)
-	tmpPath := finalPath + ".tmp"
 
-	data, err := json.Marshal(responseData)
+	data, err := marshalJSONRecord(responseData)
 	if err != nil {
 		return "", "", fmt.Errorf("marshal response: %w", err)
 	}
 
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return "", "", fmt.Errorf("write temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
-		return "", "", fmt.Errorf("atomic rename: %w", err)
+	if err := writeAtomically(finalPath, data); err != nil {
+		return "", "", fmt.Errorf("write response: %w", err)
 	}
 
 	hash := sha256.Sum256(data)
@@ -112,17 +131,10 @@ func WriteCheckpointFile(memoryRoot, turnID string, deltaBuffer []byte) (string,
 		return "", fmt.Errorf("unsafe path: %w", err)
 	}
 
-	filename := fmt.Sprintf("%s-checkpoint-%d.jsonl", turnID, time.Now().Unix())
+	filename := fmt.Sprintf("%s-checkpoint-%d.jsonl", turnID, time.Now().UnixNano())
 	finalPath := filepath.Join(checkpointDir, filename)
-	tmpPath := finalPath + ".tmp"
-
-	if err := os.WriteFile(tmpPath, deltaBuffer, 0644); err != nil {
-		return "", fmt.Errorf("write checkpoint temp: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("atomic rename checkpoint: %w", err)
+	if err := writeAtomically(finalPath, deltaBuffer); err != nil {
+		return "", fmt.Errorf("write checkpoint: %w", err)
 	}
 
 	return finalPath, nil

@@ -7,13 +7,13 @@ import (
 
 // ResponsesRequest represents an OpenAI Responses API request
 type ResponsesRequest struct {
-	Model           string          `json:"model"`
-	Instructions    string          `json:"instructions,omitempty"`
-	Input           json.RawMessage `json:"input,omitempty"` // array or string
+	Model           string            `json:"model"`
+	Instructions    string            `json:"instructions,omitempty"`
+	Input           json.RawMessage   `json:"input,omitempty"` // array or string
 	Tools           []json.RawMessage `json:"tools,omitempty"`
-	Stream          bool            `json:"stream,omitempty"`
-	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
+	Stream          bool              `json:"stream,omitempty"`
+	MaxOutputTokens *int              `json:"max_output_tokens,omitempty"`
+	Temperature     *float64          `json:"temperature,omitempty"`
 }
 
 // ParseResponsesRequest parses a Responses request
@@ -52,16 +52,15 @@ func ParseResponsesRequest(body []byte) (*InboundTurn, error) {
 // InjectResponsesInstructions injects memory package at the head of instructions
 // Preserves client's original instructions
 func InjectResponsesInstructions(req *ResponsesRequest, injectionText string) error {
-	if req.Instructions == "" {
-		// No existing instructions, use injection as instructions
-		req.Instructions = injectionText
-	} else {
+	if req.Instructions != "" {
 		// Prepend injection to existing instructions
 		req.Instructions = injectionText + "\n\n" + req.Instructions
+		return nil
 	}
 
-	// If no instructions but has input array, inject as first system message in input
-	if req.Instructions == "" && len(req.Input) > 0 {
+	// With no instructions, preserve the client's input and insert a system
+	// message at the start of an input array.
+	if len(req.Input) > 0 {
 		// Try to parse input as array
 		var inputArray []json.RawMessage
 		if err := json.Unmarshal(req.Input, &inputArray); err == nil {
@@ -83,21 +82,56 @@ func InjectResponsesInstructions(req *ResponsesRequest, injectionText string) er
 		}
 	}
 
+	// String input has no system-message slot, so use the protocol's
+	// instructions field without changing the client's input representation.
+	req.Instructions = injectionText
+
 	return nil
 }
 
 // BuildResponsesUpstreamRequest builds the upstream request with injection
 func BuildResponsesUpstreamRequest(originalBody []byte, injectionText string) ([]byte, error) {
-	var req ResponsesRequest
-	if err := json.Unmarshal(originalBody, &req); err != nil {
-		return nil, fmt.Errorf("unmarshal request: %w", err)
+	request, err := decodeRequestObject(originalBody)
+	if err != nil {
+		return nil, err
 	}
 
-	// Inject instructions
-	if err := InjectResponsesInstructions(&req, injectionText); err != nil {
+	if instructionsJSON, ok := request["instructions"]; ok && string(instructionsJSON) != "null" {
+		var instructions string
+		if err := json.Unmarshal(instructionsJSON, &instructions); err != nil {
+			return nil, fmt.Errorf("unmarshal instructions: %w", err)
+		}
+		if instructions != "" {
+			request["instructions"], err = json.Marshal(injectionText + "\n\n" + instructions)
+			if err != nil {
+				return nil, fmt.Errorf("marshal instructions: %w", err)
+			}
+			return json.Marshal(request)
+		}
+	}
+
+	if inputJSON, ok := request["input"]; ok {
+		var input []json.RawMessage
+		if err := json.Unmarshal(inputJSON, &input); err == nil {
+			systemJSON, marshalErr := json.Marshal(map[string]any{
+				"role":    "system",
+				"content": []map[string]string{{"type": "input_text", "text": injectionText}},
+			})
+			if marshalErr != nil {
+				return nil, fmt.Errorf("marshal system input: %w", marshalErr)
+			}
+			request["input"], marshalErr = json.Marshal(append([]json.RawMessage{systemJSON}, input...))
+			if marshalErr != nil {
+				return nil, fmt.Errorf("marshal input: %w", marshalErr)
+			}
+			return json.Marshal(request)
+		}
+	}
+
+	request["instructions"], err = json.Marshal(injectionText)
+	if err != nil {
 		return nil, fmt.Errorf("inject instructions: %w", err)
 	}
 
-	// Marshal back to JSON
-	return json.Marshal(req)
+	return json.Marshal(request)
 }
