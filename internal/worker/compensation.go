@@ -151,6 +151,9 @@ func ReplayBufferEvent(ctx context.Context, database *sql.DB, memoryRoot string,
 	if err := ensureTurnLedger(ctx, database, payload); err != nil {
 		return err
 	}
+	if payload.EventType == "l1_refine_pending" {
+		return enqueueBufferedL1Refine(ctx, database, payload)
+	}
 	if payload.EventType == "inbound_persisted" {
 		return replayInboundEvent(ctx, database, memoryRoot, payload)
 	}

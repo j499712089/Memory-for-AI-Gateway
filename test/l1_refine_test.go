@@ -4,12 +4,101 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"gateway/internal/db"
 	"gateway/internal/worker"
 )
+
+func TestL1RefineConcurrentEnqueueIsExactlyOnce(t *testing.T) {
+	database, root := phase3Database(t)
+	defer database.Close()
+	seedTeam(t, database)
+	teamDB := newAssetTeamDB(t, database, root)
+
+	queue := worker.NewQueue(database.Global, 0)
+	payload := worker.L1RefinePayload{
+		TeamID:         "team-1",
+		AgentID:        "agent-1",
+		TurnID:         "turn-concurrent",
+		SourceEventIDs: []string{"evt-in-concurrent", "evt-out-concurrent"},
+		Facts:          []worker.L1Fact{{Name: "Concurrent handoff", Slug: "concurrent-handoff", Summary: "one logical turn", Confidence: 0.8}},
+	}
+	const callers = 12
+	start := make(chan struct{})
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var group sync.WaitGroup
+	group.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer group.Done()
+			<-start
+			id, err := worker.EnqueueL1Refine(context.Background(), queue, payload)
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- id
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent enqueue failed: %v", err)
+	}
+	var jobs int
+	if err := database.Global.QueryRow(`SELECT COUNT(*) FROM jobs WHERE queue='l1_refine' AND partition_key=?`, "l1:team-1:turn-concurrent").Scan(&jobs); err != nil {
+		t.Fatalf("count concurrent refine jobs: %v", err)
+	}
+	if jobs != 1 {
+		t.Fatalf("expected exactly one concurrent refine job, got %d", jobs)
+	}
+	var handoffs int
+	if err := database.Global.QueryRow(`SELECT COUNT(*) FROM l1_refine_handoffs WHERE team_id=? AND turn_id=?`, "team-1", "turn-concurrent").Scan(&handoffs); err != nil {
+		t.Fatalf("count concurrent refine handoffs: %v", err)
+	}
+	if handoffs != 1 {
+		t.Fatalf("expected exactly one durable refine handoff, got %d", handoffs)
+	}
+	var firstID string
+	for id := range ids {
+		if firstID == "" {
+			firstID = id
+			continue
+		}
+		if id != firstID {
+			t.Fatalf("concurrent callers returned different job ids: %q and %q", firstID, id)
+		}
+	}
+
+	processor := worker.NewProcessor(queue)
+	if err := worker.RegisterAssetWorkers(processor, worker.AssetWorkerDeps{GlobalDB: database.Global, MemoryRoot: root}); err != nil {
+		t.Fatalf("register asset workers: %v", err)
+	}
+	processed, err := processor.ProcessOnce(context.Background(), "concurrent-worker")
+	if err != nil || !processed {
+		t.Fatalf("process concurrent refine job: processed=%v err=%v", processed, err)
+	}
+	var assets int
+	if err := teamDB.QueryRow(`SELECT COUNT(*) FROM assets WHERE asset_type='l1'`).Scan(&assets); err != nil {
+		t.Fatalf("count concurrent refined assets: %v", err)
+	}
+	if assets != 1 {
+		t.Fatalf("expected exactly one concurrent refined L1 asset, got %d", assets)
+	}
+	var routes int
+	if err := database.Global.QueryRow(`SELECT COUNT(*) FROM jobs WHERE queue IN ('wiki_build','l2_promote','skill_review')`).Scan(&routes); err != nil {
+		t.Fatalf("count concurrent derived routes: %v", err)
+	}
+	if routes != 3 {
+		t.Fatalf("expected three concurrent derived routes, got %d", routes)
+	}
+}
 
 func TestL1RefineRedactsCredentialsBeforePersistence(t *testing.T) {
 	text := worker.RedactSensitiveText(`deploy with sk-live_1234567890 api_key="gw_mcp_test_key_123" and Bearer abcdefghijklmnop`)

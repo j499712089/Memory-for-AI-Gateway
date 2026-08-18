@@ -163,6 +163,9 @@ func runMaintenance(database *sql.DB, memoryRoot string) {
 		if _, err := worker.ReplayPendingBuffers(ctx, database, memoryRoot); err != nil {
 			log.Printf("buffer replay: %v", err)
 		}
+		if _, err := worker.RecoverPendingL1RefineHandoffs(ctx, queue); err != nil {
+			log.Printf("l1 refine handoff recovery: %v", err)
+		}
 		// Scan first so the missing_response jobs it enqueues for ghost turns
 		// are claimed by the compensation processor in the same pass.
 		if _, err := sweep.Scan(ctx); err != nil {

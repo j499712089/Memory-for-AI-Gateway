@@ -347,6 +347,21 @@ CREATE INDEX IF NOT EXISTS idx_jobs_lease    ON jobs(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_jobs_partition ON jobs(partition_key, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_dead     ON jobs(status, queue);
 
+-- L1 handoffs are durable, one-per-turn claims. The job insert and the handoff
+-- state transition are committed together by worker.EnqueueL1Refine, so retry
+-- and concurrent terminal paths cannot create duplicate active refinements.
+CREATE TABLE IF NOT EXISTS l1_refine_handoffs (
+    team_id      TEXT NOT NULL,
+    turn_id      TEXT NOT NULL,
+    job_id       TEXT UNIQUE,
+    payload_json TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','enqueued')),
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    enqueued_at  TEXT,
+    PRIMARY KEY (team_id, turn_id)
+);
+CREATE INDEX IF NOT EXISTS idx_l1_handoffs_pending ON l1_refine_handoffs(status, created_at);
+
 -- 死信明细（与 jobs.status='dead_letter' 关联，保留完整轨迹）
 CREATE TABLE IF NOT EXISTS dead_letters (
     id               TEXT PRIMARY KEY,

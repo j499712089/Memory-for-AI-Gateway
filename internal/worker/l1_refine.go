@@ -208,8 +208,9 @@ func ShouldRefine(completedTurns int) bool {
 	return completedTurns >= 1
 }
 
-// EnqueueL1Refine queues an l1_refine job for a completed turn. This is the
-// hook the terminal handler calls when a turn reaches 'complete'.
+// EnqueueL1Refine records a durable one-per-turn handoff before dispatching
+// its l1_refine job. The handoff survives a transient queue insert failure and
+// is later retried by RecoverPendingL1RefineHandoffs.
 func EnqueueL1Refine(ctx context.Context, queue *Queue, payload L1RefinePayload) (string, error) {
 	if queue == nil || queue.database == nil {
 		return "", fmt.Errorf("queue is nil")
@@ -231,31 +232,145 @@ func EnqueueL1Refine(ctx context.Context, queue *Queue, payload L1RefinePayload)
 		return "", nil
 	}
 	payload.Facts = sanitizedFacts
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal l1 refine handoff: %w", err)
+	}
+	now := queue.now().UTC().Format(time.RFC3339Nano)
+	if _, err := queue.database.ExecContext(context.WithoutCancel(ctx), `
+		INSERT INTO l1_refine_handoffs (team_id, turn_id, payload_json, status, created_at)
+		VALUES (?, ?, ?, 'pending', ?)
+		ON CONFLICT(team_id, turn_id) DO NOTHING
+	`, payload.TeamID, payload.TurnID, string(payloadJSON), now); err != nil {
+		return "", fmt.Errorf("persist l1 refine handoff: %w", err)
+	}
+	return queue.dispatchL1RefineHandoff(context.WithoutCancel(ctx), payload.TeamID, payload.TurnID)
+}
+
+func (q *Queue) dispatchL1RefineHandoff(ctx context.Context, teamID, turnID string) (id string, err error) {
+	conn, err := q.database.Conn(ctx)
+	if err != nil {
+		return "", fmt.Errorf("acquire l1 refine handoff connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return "", fmt.Errorf("begin l1 refine handoff transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	var jobID, payloadJSON string
+	if err = conn.QueryRowContext(ctx, `
+		SELECT COALESCE(job_id, ''), payload_json
+		FROM l1_refine_handoffs
+		WHERE team_id=? AND turn_id=?
+	`, teamID, turnID).Scan(&jobID, &payloadJSON); err != nil {
+		return "", fmt.Errorf("load l1 refine handoff: %w", err)
+	}
+	if jobID != "" {
+		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return "", fmt.Errorf("commit existing l1 refine handoff: %w", err)
+		}
+		committed = true
+		return jobID, nil
+	}
+
+	var payload L1RefinePayload
+	if err = json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", fmt.Errorf("parse l1 refine handoff payload: %w", err)
+	}
 	partitionKey := "l1:" + payload.TeamID + ":" + payload.TurnID
-	var existingID string
-	err := queue.database.QueryRowContext(ctx, `SELECT id FROM jobs WHERE queue='l1_refine' AND partition_key=? AND status IN ('pending','processing','done') ORDER BY created_at DESC LIMIT 1`, partitionKey).Scan(&existingID)
-	if err == nil {
-		return existingID, nil
+	var existingJobID string
+	err = conn.QueryRowContext(ctx, `
+		SELECT id FROM jobs
+		WHERE queue='l1_refine' AND partition_key=? AND status IN ('pending','processing','done')
+		ORDER BY created_at DESC LIMIT 1
+	`, partitionKey).Scan(&existingJobID)
+	if err == sql.ErrNoRows {
+		existingJobID = idgen.NewID()
+		now := q.now().UTC().Format(time.RFC3339Nano)
+		if _, err = conn.ExecContext(ctx, `
+			INSERT INTO jobs (
+				id, queue, priority, team_id, agent_id, asset_id, asset_type,
+				payload_json, status, retry_count, max_retries, partition_key,
+				created_at, next_retry_at
+			) VALUES (?, 'l1_refine', ?, ?, ?, NULL, 'l1', ?, 'pending', 0, 5, ?, ?, ?)
+		`, existingJobID, DefaultPriority("l1_refine"), nullable(payload.TeamID), nullable(payload.AgentID), payloadJSON, partitionKey, now, now); err != nil {
+			return "", fmt.Errorf("enqueue l1 refine job: %w", err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("check existing l1 refine job: %w", err)
 	}
-	if err != sql.ErrNoRows {
-		return "", fmt.Errorf("check existing l1_refine job: %w", err)
+
+	now := q.now().UTC().Format(time.RFC3339Nano)
+	result, err := conn.ExecContext(ctx, `
+		UPDATE l1_refine_handoffs
+		SET job_id=?, status='enqueued', enqueued_at=?
+		WHERE team_id=? AND turn_id=? AND job_id IS NULL
+	`, existingJobID, now, teamID, turnID)
+	if err != nil {
+		return "", fmt.Errorf("mark l1 refine handoff enqueued: %w", err)
 	}
-	id, err := queue.Enqueue(ctx, Job{
-		Queue:        "l1_refine",
-		TeamID:       payload.TeamID,
-		AgentID:      payload.AgentID,
-		AssetType:    "l1",
-		PartitionKey: partitionKey,
-		Payload:      payload,
-	})
-	if err == nil {
-		return id, nil
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return "", fmt.Errorf("l1 refine handoff dispatch lost race")
 	}
-	// A concurrent terminal writer may have won the logical enqueue check.
-	if queryErr := queue.database.QueryRowContext(ctx, `SELECT id FROM jobs WHERE queue='l1_refine' AND partition_key=? AND status IN ('pending','processing','done') ORDER BY created_at DESC LIMIT 1`, partitionKey).Scan(&existingID); queryErr == nil {
-		return existingID, nil
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return "", fmt.Errorf("commit l1 refine handoff: %w", err)
 	}
-	return "", err
+	committed = true
+	return existingJobID, nil
+}
+
+// RecoverPendingL1RefineHandoffs retries handoffs whose terminal was durable
+// but whose initial queue insert did not commit. It is safe to run at startup
+// and on periodic maintenance because dispatching is transactional.
+func RecoverPendingL1RefineHandoffs(ctx context.Context, queue *Queue) (int, error) {
+	if queue == nil || queue.database == nil {
+		return 0, fmt.Errorf("queue is nil")
+	}
+	if queue.initErr != nil {
+		return 0, queue.initErr
+	}
+	rows, err := queue.database.QueryContext(ctx, `
+		SELECT team_id, turn_id
+		FROM l1_refine_handoffs
+		WHERE status='pending'
+		ORDER BY created_at, team_id, turn_id
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("list pending l1 refine handoffs: %w", err)
+	}
+	type handoffKey struct {
+		teamID string
+		turnID string
+	}
+	keys := make([]handoffKey, 0)
+	for rows.Next() {
+		var key handoffKey
+		if err := rows.Scan(&key.teamID, &key.turnID); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan pending l1 refine handoff: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("iterate pending l1 refine handoffs: %w", err)
+	}
+	rows.Close()
+
+	recovered := 0
+	for _, key := range keys {
+		if _, err := queue.dispatchL1RefineHandoff(context.WithoutCancel(ctx), key.teamID, key.turnID); err != nil {
+			return recovered, fmt.Errorf("recover l1 refine handoff %s/%s: %w", key.teamID, key.turnID, err)
+		}
+		recovered++
+	}
+	return recovered, nil
 }
 
 // RefineL1 persists candidate L1 assets for every fact, skipping duplicates

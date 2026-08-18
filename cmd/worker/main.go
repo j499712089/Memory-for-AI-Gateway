@@ -87,6 +87,14 @@ func main() {
 	workerID := fmt.Sprintf("%s:%d", hostname, os.Getpid())
 
 	queue := worker.NewQueue(database.Global, workerLeaseDuration)
+	handoffCtx, handoffCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	recoveredHandoffs, handoffErr := worker.RecoverPendingL1RefineHandoffs(handoffCtx, queue)
+	handoffCancel()
+	if handoffErr != nil {
+		log.Printf("Startup L1 handoff recovery failed (continuing): %v", handoffErr)
+	} else if recoveredHandoffs > 0 {
+		log.Printf("Startup L1 handoff recovery: %d handoffs dispatched", recoveredHandoffs)
+	}
 	processor := worker.NewProcessor(queue)
 	if err := worker.RegisterAssetWorkers(processor, worker.AssetWorkerDeps{
 		GlobalDB:   database.Global,

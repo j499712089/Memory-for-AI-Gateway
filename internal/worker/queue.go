@@ -61,6 +61,20 @@ func EnsureQueueSchema(database *sql.DB) error {
 	if database == nil {
 		return fmt.Errorf("worker database is nil")
 	}
+	if _, err := database.Exec(`
+		CREATE TABLE IF NOT EXISTS l1_refine_handoffs (
+			team_id TEXT NOT NULL,
+			turn_id TEXT NOT NULL,
+			job_id TEXT UNIQUE,
+			payload_json TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','enqueued')),
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			enqueued_at TEXT,
+			PRIMARY KEY (team_id, turn_id)
+		)
+	`); err != nil {
+		return fmt.Errorf("ensure l1 refine handoff schema: %w", err)
+	}
 	var hasNextRetry bool
 	rows, err := database.Query(`PRAGMA table_info(jobs)`)
 	if err != nil {

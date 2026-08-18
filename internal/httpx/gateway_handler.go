@@ -402,9 +402,13 @@ func (h *GatewayHandler) recordTerminalResult(ctx context.Context, tr terminalRe
 		if recordedEventID, err := h.persistTerminalToSQLite(ctx, tr); err == nil {
 			tr.EventID = recordedEventID
 			if err := h.enqueueL1Refine(ctx, tr); err != nil {
-				// The terminal is already durable. Keep the client response
-				// successful and let the worker queue retry on the next completed
-				// turn rather than rewriting a terminal event.
+				// A queue insert can fail after the terminal committed. Persist a
+				// replayable handoff before returning success so startup and worker
+				// recovery retry this exact completed turn rather than waiting for a
+				// later turn to happen to re-trigger refinement.
+				if handoffErr := h.persistL1RefineHandoffToBuffer(ctx, tr); handoffErr != nil {
+					log.Printf("persist l1 refine handoff for turn %s: %v", tr.TurnID, handoffErr)
+				}
 				log.Printf("enqueue l1 refine for turn %s: %v", tr.TurnID, err)
 			}
 			return recordedEventID, false, nil
@@ -443,6 +447,38 @@ func (h *GatewayHandler) enqueueL1Refine(ctx context.Context, tr terminalRecord)
 		CompletedAt:    time.Now().UTC(),
 	})
 	return err
+}
+
+func (h *GatewayHandler) persistL1RefineHandoffToBuffer(ctx context.Context, tr terminalRecord) error {
+	if tr.Status != turn.StatusComplete || h.refineQueue == nil {
+		return nil
+	}
+	if len(worker.ExtractL1Facts(tr.FactText, tr.TurnID)) == 0 {
+		return nil
+	}
+	record, err := db.WriteLocalBuffer(context.WithoutCancel(ctx), h.db, h.memoryRoot, db.BufferEventPayload{
+		BufferKey:      tr.RequestID,
+		EventID:        tr.EventID,
+		TurnID:         tr.TurnID,
+		RequestID:      tr.RequestID,
+		ConversationID: tr.ConversationID,
+		SessionID:      tr.SessionID,
+		TeamID:         tr.TeamID,
+		AgentID:        tr.AgentID,
+		IdentityCardID: tr.IdentityCardID,
+		Direction:      "outbound",
+		Sequence:       1,
+		EventType:      "l1_refine_pending",
+		Status:         "pending",
+		FactText:       worker.RedactSensitiveText(tr.FactText),
+	})
+	if err != nil {
+		return err
+	}
+	// The file is already durable. This job only makes replay prompt; startup
+	// reconciliation also finds the file if the queue write fails again.
+	_ = worker.EnqueueBufferReplay(context.WithoutCancel(ctx), h.db, record.ID, tr.RequestID)
+	return nil
 }
 
 func (h *GatewayHandler) persistTerminalToSQLite(ctx context.Context, tr terminalRecord) (string, error) {
