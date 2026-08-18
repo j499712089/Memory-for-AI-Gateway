@@ -1,0 +1,11 @@
+# Build outputs
+*.exe
+
+# Runtime logs
+*.log
+
+# Health-check scratch
+health-response.txt
+
+# Local environment (keep .env.example tracked)
+.env

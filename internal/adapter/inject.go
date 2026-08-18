@@ -15,7 +15,7 @@ const ManifestVersion = "phase3-v1"
 // request-specific root is resolved by the gateway before file access.
 const DefaultPathManifest = `## Memory Context Paths
 MEMORY_ROOT       <configured memory root>
-CHAT_MEMORY       L0-L4
+SYSTEM_CORE       00_系统
 WIKI              02_Wiki知识库
 CODE_GRAPH        03_代码关系图
 SKILLS            04_技能库
@@ -23,6 +23,11 @@ TEAM_AGENT        05_团队与代理
 EVENT_QUEUE       06_事件队列
 INDEX             07_索引
 RUNTIME           90_运行数据
+L0_RAW            L0_原始记录
+L1_TASK           L1_任务纪要
+L2_KNOWLEDGE      L2_知识经验
+L3_IDENTITY       L3_团队身份
+L4_PRINCIPLE      L4_长期准则
 
 ## Dynamic Fields
 user_id, team_id, agent_id, project_id, task_id, conversation_id, turn_id

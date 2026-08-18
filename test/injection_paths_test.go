@@ -57,7 +57,7 @@ func TestCompatibilityInjectionPackageUsesAuditableManifest(t *testing.T) {
 	if pkg.ManifestVersion != adapter.ManifestVersion || pkg.ManifestVersion == "phase2-placeholder" {
 		t.Fatalf("unexpected manifest version: %q", pkg.ManifestVersion)
 	}
-	for _, label := range []string{"MEMORY_ROOT", "CHAT_MEMORY", "WIKI", "CODE_GRAPH", "SKILLS", "TEAM_AGENT", "EVENT_QUEUE", "INDEX", "RUNTIME"} {
+	for _, label := range []string{"MEMORY_ROOT", "SYSTEM_CORE", "WIKI", "CODE_GRAPH", "SKILLS", "TEAM_AGENT", "EVENT_QUEUE", "INDEX", "RUNTIME", "L0_RAW", "L1_TASK", "L2_KNOWLEDGE", "L3_IDENTITY", "L4_PRINCIPLE"} {
 		if !strings.Contains(pkg.PathManifest, label) {
 			t.Errorf("manifest missing label %q", label)
 		}
