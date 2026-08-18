@@ -2,17 +2,374 @@
 
 <div align="center">
 
+**Distributed Memory Storage and Intelligent Retrieval Gateway for AI Agents**
+
 **专为 AI Agent 构建的分布式记忆存储与智能检索网关**
 
 [![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[English](#) | [简体中文](#)
+[English](#english) | [简体中文](#简体中文)
 
 </div>
 
 ---
+
+# English
+
+## 📖 Introduction
+
+Memory-for-AI Gateway is a **production-grade AI memory management system** that provides unified knowledge base storage, semantic retrieval, and context management capabilities for multi-agent collaboration scenarios.
+
+### 🎯 Core Features
+
+- **🔐 Fine-grained Access Control** - Team/Project/Session-level isolation with ACL and role binding
+- **🧩 Multi-modal Memory Storage** - Unified indexing for conversation history, document fragments, code graphs, and Obsidian notes
+- **⚡ High-performance Retrieval** - Tree-sitter-based code semantic analysis with incremental impact analysis
+- **🔌 MCP Protocol Support** - Native integration with Claude Desktop, Codebuddy, Multica, and other agent runtimes
+- **🏢 Enterprise Architecture** - Worker queue + Watchdog monitoring + self-healing mechanisms
+
+---
+
+## 🏗️ System Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      AI Agent Client Layer                        │
+│   Claude Desktop  │  Codebuddy  │  Multica  │  Custom Agents    │
+└─────────────────┬────────────────────────────────────────────────┘
+                  │ MCP Protocol / HTTP API
+┌─────────────────▼────────────────────────────────────────────────┐
+│                  Memory Gateway (Port 8096)                       │
+│                                                                   │
+│  ┌───────────────┐  ┌─────────────┐  ┌──────────────┐          │
+│  │  Auth & ACL   │  │   Adapter   │  │  Retrieval   │          │
+│  │  (Identity &  │  │   (Protocol │  │   Engine     │          │
+│  │  Permissions) │  │   Adapter)  │  │  (Semantic   │          │
+│  └───────────────┘  └─────────────┘  │   Search)    │          │
+│                                       └──────────────┘          │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │     Codegraph Engine (Tree-sitter Parser)        │          │
+│  │  Languages: Go │ Python │ TypeScript │ JavaScript│          │
+│  │  Features: Symbol extraction, Call graph,        │          │
+│  │            Impact analysis, Semantic indexing    │          │
+│  └──────────────────────────────────────────────────┘          │
+└─────────────────┬────────────────────────────────────────────────┘
+                  │
+┌─────────────────▼────────────────────────────────────────────────┐
+│                   Storage & Scheduling Layer                      │
+│                                                                   │
+│  ┌──────────────┐   ┌──────────────┐   ┌────────────────┐      │
+│  │   SQLite     │   │    Worker    │   │   Watchdog     │      │
+│  │  (Global DB) │   │  (Task Queue)│   │ (Health Check) │      │
+│  │  - Metadata  │   │  - Indexing  │   │  - Monitoring  │      │
+│  │  - Sessions  │   │  - Cleanup   │   │  - Auto-heal   │      │
+│  └──────────────┘   └──────────────┘   └────────────────┘      │
+│                                                                   │
+│  ┌───────────────────────────────────────────────────────┐      │
+│  │   Teams DB (Multi-tenancy + Secrets Management)       │      │
+│  │   - Isolated team workspaces                          │      │
+│  │   - Encrypted credential storage                      │      │
+│  └───────────────────────────────────────────────────────┘      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 📦 Core Modules
+
+| Module | Responsibility | Tech Stack |
+|--------|---------------|------------|
+| **Gateway** | HTTP API Gateway + MCP Server | Gin + modernc.org/sqlite |
+| **Worker** | Async task processing (incremental indexing, scheduled cleanup) | Goroutine Pool |
+| **Codegraph** | Code semantic parsing & impact analysis | Tree-sitter (multi-language) |
+| **Retrieval** | Multi-modal retrieval (conversation/documents/code) | Custom vectorization + BM25 hybrid |
+| **Auth/ACL** | Authentication + fine-grained access control | UUID + Role-based ACL |
+| **Obsidian Adapter** | Markdown note indexing & wikilink parsing | File watching + incremental sync |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- **Go 1.23+** (required)
+- **Node.js 18+** (optional, only needed for MCP client development)
+- **Operating System**: Windows 10/11, Linux, or macOS
+
+### Installation
+
+#### Windows
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/j499712089/Memory-for-AI.git
+cd Memory-for-AI/gateway
+
+# 2. Set environment variables (optional)
+set MEMORY_PLUS_DIR=F:\memory_plus
+set GATEWAY_PORT=8096
+
+# 3. Build and run
+go build -o gateway.exe cmd/gateway/main.go
+gateway.exe
+
+# 4. Health check
+curl http://127.0.0.1:8096/health
+```
+
+#### macOS / Linux
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/j499712089/Memory-for-AI.git
+cd Memory-for-AI/gateway
+
+# 2. Set environment variables (optional)
+export MEMORY_PLUS_DIR="$HOME/memory_plus"
+export GATEWAY_PORT=8096
+
+# 3. Build and run
+make build
+./gateway
+
+# 4. Health check
+curl http://127.0.0.1:8096/health
+```
+
+### Docker Deployment
+
+```bash
+docker run -d \
+  -p 8096:8096 \
+  -v /path/to/data:/data \
+  -e GATEWAY_PORT=8096 \
+  --name memory-gateway \
+  j499712089/memory-gateway:latest
+```
+
+---
+
+## 🔌 Client Integration
+
+### Claude Desktop (macOS / Windows)
+
+1. **Install Claude Desktop**
+   - Download from [claude.ai/download](https://claude.ai/download)
+
+2. **Configure MCP Server**
+   
+   **macOS**: Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+   
+   **Windows**: Edit `%APPDATA%\Claude\claude_desktop_config.json`
+
+   ```json
+   {
+     "mcpServers": {
+       "memory-gateway": {
+         "command": "node",
+         "args": ["/path/to/Memory-for-AI/mcp-server/dist/index.js"],
+         "env": {
+           "GATEWAY_URL": "http://127.0.0.1:8096"
+         }
+       }
+     }
+   }
+   ```
+
+3. **Restart Claude Desktop**
+
+### Codebuddy (Windows / Linux / macOS)
+
+1. **Install Codebuddy**
+   ```bash
+   npm install -g @codebuddy/cli
+   ```
+
+2. **Configure Gateway**
+   ```bash
+   codebuddy config set memory.gateway http://127.0.0.1:8096
+   codebuddy config set memory.enabled true
+   ```
+
+3. **Verify Connection**
+   ```bash
+   codebuddy memory status
+   ```
+
+### Multica Platform
+
+1. **Access Multica Dashboard**
+   - Navigate to Settings → Integrations
+
+2. **Add Memory Gateway**
+   - Gateway URL: `http://127.0.0.1:8096`
+   - API Key: (generated from gateway admin panel)
+
+3. **Enable for Agents**
+   - Select agents that need memory access
+   - Configure permission scopes (team/project/session)
+
+### Custom Integration (HTTP API)
+
+```bash
+# Store memory
+curl -X POST http://127.0.0.1:8096/api/v1/memories \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "User prefers dark mode",
+    "type": "preference",
+    "tags": ["ui", "settings"]
+  }'
+
+# Retrieve memory
+curl -X GET "http://127.0.0.1:8096/api/v1/memories/search?q=dark+mode"
+
+# Code impact analysis
+curl -X POST http://127.0.0.1:8096/api/v1/codegraph/impact \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file": "auth.go",
+    "function": "ValidateToken"
+  }'
+```
+
+---
+
+## 💡 Use Cases
+
+### 1️⃣ Multi-Agent Collaboration Memory Sharing
+
+```
+Agent A: "What was the authentication approach we discussed last time?"
+Gateway: [Retrieves team memory] → "OAuth 2.0 + JWT, documented in PRD #42"
+
+Agent B: "Which modules will be affected if auth.go is modified?"
+Gateway: [Codegraph analysis] → "3 files affected: handler.go, middleware.go, tests"
+```
+
+### 2️⃣ Project Knowledge Base Persistence
+
+- **Session History Archiving** - All conversations automatically stored with semantic search support
+- **Document Version Tracking** - Unified management of PRDs, design docs, and code comments
+- **Decision Record Precipitation** - Automatic extraction of ADRs (Architecture Decision Records)
+
+### 3️⃣ Obsidian Notes + AI Integration
+
+```markdown
+# Example Obsidian Note
+The decision to use [[Microservice Architecture]] was made in [[Project Kickoff Meeting]]
+→ Gateway automatically parses wikilinks to build knowledge graph
+→ Agent can query: "All meeting records related to microservice architecture"
+```
+
+---
+
+## 📊 Performance Metrics
+
+| Metric | Value | Description |
+|--------|-------|-------------|
+| **Lines of Code** | 16,970+ lines Go | Excluding tests and vendor |
+| **Test Coverage** | 85%+ | 50+ unit tests + integration tests |
+| **Retrieval Latency** | <50ms (P95) | At 100K memory scale |
+| **Concurrency** | 500 QPS | Single server (4 cores, 8GB RAM) |
+| **Database** | SQLite (WAL mode) | Supports millions of records |
+
+---
+
+## 🛠️ Development Guide
+
+### Project Structure
+
+```
+gateway/
+├── cmd/
+│   ├── gateway/        # Main service entry
+│   └── worker/         # Background task entry
+├── internal/
+│   ├── adapter/        # LLM protocol adapters (OpenAI/Anthropic)
+│   ├── auth/           # Authentication & authorization
+│   ├── codegraph/      # Code graph engine
+│   ├── db/             # Database layer
+│   ├── retrieval/      # Retrieval engine
+│   ├── skill/          # Multica skill integration
+│   └── httpx/          # HTTP routing & middleware
+├── mcp-server/         # MCP protocol server (TypeScript)
+├── schema/             # Database schemas
+├── test/               # Integration tests
+└── Makefile            # Build scripts
+```
+
+### Local Development
+
+```bash
+# Run all tests
+make test
+
+# Code formatting
+go fmt ./...
+
+# Static analysis
+go vet ./...
+
+# Start dev server (with hot reload)
+go run cmd/gateway/main.go
+```
+
+---
+
+## 🤝 Contributing
+
+We welcome all forms of contributions! Including but not limited to:
+
+- 🐛 Submit bug reports
+- ✨ Propose new features
+- 📝 Improve documentation
+- 🔧 Submit code patches
+
+### Contribution Steps
+
+1. Fork this repository
+2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Submit a Pull Request
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 🌟 Star History
+
+If this project helps you, please give us a ⭐️ Star!
+
+Your support motivates us to keep improving 💪
+
+---
+
+## 📞 Contact
+
+- **Issue Tracker**: [GitHub Issues](https://github.com/j499712089/Memory-for-AI/issues)
+- **Email**: 861892722@qq.com
+- **Documentation**: [Full Docs](https://github.com/j499712089/Memory-for-AI/wiki)
+
+---
+
+<div align="center">
+
+**Built with ❤️ by Memory-for-AI Team**
+
+Empowering every AI Agent with long-term memory 🧠
+
+</div>
+
+---
+---
+
+# 简体中文
 
 ## 📖 项目简介
 
@@ -31,33 +388,43 @@ Memory-for-AI Gateway 是一个**生产级 AI 记忆管理系统**，为多 Agen
 ## 🏗️ 系统架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     AI Agent 客户端层                        │
-│  Claude Desktop │ Codebuddy │ Multica │ 自定义 Agent        │
-└────────────┬────────────────────────────────────────────────┘
-             │ MCP Protocol / HTTP API
-┌────────────▼────────────────────────────────────────────────┐
-│                   Memory Gateway (Port 8096)                 │
-│  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐       │
-│  │   Auth &     │  │   Adapter   │  │   Retrieval  │       │
-│  │     ACL      │  │   Layer     │  │    Engine    │       │
-│  └──────────────┘  └─────────────┘  └──────────────┘       │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │          Codegraph (Tree-sitter 语义解析)         │       │
-│  │   Go │ Python │ TypeScript │ JavaScript 支持      │       │
-│  └──────────────────────────────────────────────────┘       │
-└────────────┬────────────────────────────────────────────────┘
-             │
-┌────────────▼────────────────────────────────────────────────┐
-│                    存储与调度层                              │
-│  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐    │
-│  │   SQLite    │   │    Worker    │   │   Watchdog   │    │
-│  │ (Global DB) │   │   (任务队列)  │   │  (健康检查)   │    │
-│  └─────────────┘   └──────────────┘   └──────────────┘    │
-│  ┌───────────────────────────────────────────────────┐     │
-│  │        Teams DB (多租户隔离 + Secrets 管理)        │     │
-│  └───────────────────────────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        AI Agent 客户端层                          │
+│   Claude Desktop  │  Codebuddy  │  Multica  │  自定义 Agent     │
+└─────────────────┬────────────────────────────────────────────────┘
+                  │ MCP 协议 / HTTP API
+┌─────────────────▼────────────────────────────────────────────────┐
+│                  Memory Gateway (端口 8096)                       │
+│                                                                   │
+│  ┌───────────────┐  ┌─────────────┐  ┌──────────────┐          │
+│  │  Auth & ACL   │  │   Adapter   │  │  Retrieval   │          │
+│  │  (身份认证与  │  │   (协议适配)│  │   Engine     │          │
+│  │   权限控制)   │  │             │  │  (语义检索)  │          │
+│  └───────────────┘  └─────────────┘  └──────────────┘          │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │     Codegraph 引擎 (Tree-sitter 解析器)          │          │
+│  │  支持语言: Go │ Python │ TypeScript │ JavaScript │          │
+│  │  功能: 符号提取, 调用图谱, 影响分析, 语义索引   │          │
+│  └──────────────────────────────────────────────────┘          │
+└─────────────────┬────────────────────────────────────────────────┘
+                  │
+┌─────────────────▼────────────────────────────────────────────────┐
+│                      存储与调度层                                 │
+│                                                                   │
+│  ┌──────────────┐   ┌──────────────┐   ┌────────────────┐      │
+│  │   SQLite     │   │    Worker    │   │   Watchdog     │      │
+│  │  (全局数据库)│   │  (任务队列)  │   │  (健康检查)    │      │
+│  │  - 元数据    │   │  - 增量索引  │   │  - 监控告警    │      │
+│  │  - 会话记录  │   │  - 定时清理  │   │  - 自动修复    │      │
+│  └──────────────┘   └──────────────┘   └────────────────┘      │
+│                                                                   │
+│  ┌───────────────────────────────────────────────────────┐      │
+│  │   Teams DB (多租户隔离 + Secrets 管理)                │      │
+│  │   - 团队工作空间隔离                                  │      │
+│  │   - 加密凭据存储                                      │      │
+│  └───────────────────────────────────────────────────────┘      │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 📦 核心模块说明
@@ -79,9 +446,11 @@ Memory-for-AI Gateway 是一个**生产级 AI 记忆管理系统**，为多 Agen
 
 - **Go 1.23+** (必需)
 - **Node.js 18+** (可选，仅 MCP 客户端开发需要)
-- **Windows 10/11** 或 **Linux/macOS**
+- **操作系统**: Windows 10/11、Linux 或 macOS
 
-### 一键启动
+### 安装步骤
+
+#### Windows
 
 ```bash
 # 1. 克隆仓库
@@ -89,13 +458,31 @@ git clone https://github.com/j499712089/Memory-for-AI.git
 cd Memory-for-AI/gateway
 
 # 2. 配置环境变量（可选）
-export MEMORY_PLUS_DIR="F:\memory_plus"  # Windows 默认路径
+set MEMORY_PLUS_DIR=F:\memory_plus
+set GATEWAY_PORT=8096
+
+# 3. 编译并运行
+go build -o gateway.exe cmd/gateway/main.go
+gateway.exe
+
+# 4. 健康检查
+curl http://127.0.0.1:8096/health
+```
+
+#### macOS / Linux
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/j499712089/Memory-for-AI.git
+cd Memory-for-AI/gateway
+
+# 2. 配置环境变量（可选）
+export MEMORY_PLUS_DIR="$HOME/memory_plus"
 export GATEWAY_PORT=8096
 
 # 3. 编译并运行
 make build
-./gateway.exe  # Windows
-./gateway      # Linux/macOS
+./gateway
 
 # 4. 健康检查
 curl http://127.0.0.1:8096/health
@@ -107,8 +494,95 @@ curl http://127.0.0.1:8096/health
 docker run -d \
   -p 8096:8096 \
   -v /path/to/data:/data \
+  -e GATEWAY_PORT=8096 \
   --name memory-gateway \
   j499712089/memory-gateway:latest
+```
+
+---
+
+## 🔌 客户端集成
+
+### Claude Desktop (macOS / Windows)
+
+1. **安装 Claude Desktop**
+   - 从 [claude.ai/download](https://claude.ai/download) 下载
+
+2. **配置 MCP 服务器**
+   
+   **macOS**: 编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`
+   
+   **Windows**: 编辑 `%APPDATA%\Claude\claude_desktop_config.json`
+
+   ```json
+   {
+     "mcpServers": {
+       "memory-gateway": {
+         "command": "node",
+         "args": ["/path/to/Memory-for-AI/mcp-server/dist/index.js"],
+         "env": {
+           "GATEWAY_URL": "http://127.0.0.1:8096"
+         }
+       }
+     }
+   }
+   ```
+
+3. **重启 Claude Desktop**
+
+### Codebuddy (Windows / Linux / macOS)
+
+1. **安装 Codebuddy**
+   ```bash
+   npm install -g @codebuddy/cli
+   ```
+
+2. **配置 Gateway**
+   ```bash
+   codebuddy config set memory.gateway http://127.0.0.1:8096
+   codebuddy config set memory.enabled true
+   ```
+
+3. **验证连接**
+   ```bash
+   codebuddy memory status
+   ```
+
+### Multica 平台
+
+1. **访问 Multica 控制台**
+   - 导航至 设置 → 集成
+
+2. **添加 Memory Gateway**
+   - Gateway URL: `http://127.0.0.1:8096`
+   - API Key: (从 gateway 管理面板生成)
+
+3. **为 Agent 启用**
+   - 选择需要记忆访问的 Agent
+   - 配置权限范围（团队/项目/会话）
+
+### 自定义集成 (HTTP API)
+
+```bash
+# 存储记忆
+curl -X POST http://127.0.0.1:8096/api/v1/memories \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "用户偏好深色模式",
+    "type": "preference",
+    "tags": ["ui", "settings"]
+  }'
+
+# 检索记忆
+curl -X GET "http://127.0.0.1:8096/api/v1/memories/search?q=深色模式"
+
+# 代码影响分析
+curl -X POST http://127.0.0.1:8096/api/v1/codegraph/impact \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file": "auth.go",
+    "function": "ValidateToken"
+  }'
 ```
 
 ---
@@ -150,7 +624,7 @@ Gateway: [Codegraph 分析] → "影响 3 个文件：handler.go, middleware.go,
 | **测试覆盖率** | 85%+ | 50+ 单元测试 + 集成测试 |
 | **检索延迟** | <50ms (P95) | 10 万条记忆规模 |
 | **并发能力** | 500 QPS | 单机 4 核 8GB 环境 |
-| **数据库性能** | SQLite (Write-Ahead Logging) | 支持百万级记录 |
+| **数据库性能** | SQLite (WAL 模式) | 支持百万级记录 |
 
 ---
 
@@ -241,5 +715,7 @@ go run cmd/gateway/main.go
 **Built with ❤️ by Memory-for-AI Team**
 
 让每一个 AI Agent 都拥有长期记忆 🧠
+
+Empowering every AI Agent with long-term memory 🧠
 
 </div>
