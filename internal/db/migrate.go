@@ -63,28 +63,48 @@ func Migrate(db *sql.DB, schemaPath string) error {
 	return lastErr
 }
 
-// runMigrationTx applies the idempotent schema and records the migration in a
-// single transaction. Idempotent by design (see Migrate docs).
+// runMigrationTx applies the idempotent schema and records the migration.
+//
+// The schema application and the migration record are split so a restart never
+// takes the write lock just to re-insert a version that is already there:
+// INSERT OR IGNORE still acquires the write lock even when it ends up ignoring
+// the row, so an already-migrated database would otherwise fail with
+// SQLITE_BUSY whenever a concurrent writer (the worker) holds the lock.
 func runMigrationTx(db *sql.DB, schema []byte) error {
-	tx, err := db.Begin()
+	// Apply the idempotent schema. When every table already exists these are
+	// no-ops and the transaction commits without ever taking the write lock.
+	schemaTx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin schema transaction: %w", err)
 	}
-	defer tx.Rollback()
-
-	// Execute schema
-	if _, err := tx.Exec(string(schema)); err != nil {
+	defer schemaTx.Rollback()
+	if _, err := schemaTx.Exec(string(schema)); err != nil {
 		return fmt.Errorf("failed to execute schema: %w", err)
 	}
-
-	// Record the initial migration idempotently. A database that already has
-	// the 'initial' version simply ignores this insert.
-	if _, err := tx.Exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('initial')"); err != nil {
-		return fmt.Errorf("failed to record migration: %w", err)
+	if err := schemaTx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit schema: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit migration: %w", err)
+	// Record the migration only when 'initial' is absent, so the write lock is
+	// never requested on a routine restart of an already-migrated database.
+	var already int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version='initial'`).Scan(&already); err != nil {
+		return fmt.Errorf("check migration state: %w", err)
+	}
+	if already > 0 {
+		return nil
+	}
+
+	recordTx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin migration record: %w", err)
+	}
+	defer recordTx.Rollback()
+	if _, err := recordTx.Exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('initial')"); err != nil {
+		return fmt.Errorf("failed to record migration: %w", err)
+	}
+	if err := recordTx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit migration record: %w", err)
 	}
 
 	return nil
