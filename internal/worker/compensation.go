@@ -228,7 +228,13 @@ func replayInjectionSnapshot(ctx context.Context, database *sql.DB, payload db.B
 	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM injection_snapshots WHERE request_id = ?`, payload.RequestID).Scan(&exists); err != nil || exists > 0 {
 		return
 	}
-	sources, _ := json.Marshal(payload.InjectionSources)
+	// Normalize a nil source set to "[]" so replayed snapshots never store the
+	// JSON literal "null" (which breaks E2E readers that parse source_ids).
+	sourceIDs := payload.InjectionSources
+	if sourceIDs == nil {
+		sourceIDs = []string{}
+	}
+	sources, _ := json.Marshal(sourceIDs)
 	manifest := payload.InjectionManifestVersion
 	if manifest == "" {
 		manifest = "phase3-v1"

@@ -54,7 +54,14 @@ func RecordSnapshot(ctx context.Context, database *sql.DB, snapshot Snapshot) er
 		committed = true
 		return nil
 	}
-	sources, err := json.Marshal(snapshot.Package.SourceEventIDs)
+	// A nil SourceEventIDs marshals to the JSON literal "null", which the E2E
+	// harness reads back as None. Normalize to an empty array so downstream
+	// readers always see "[]" for an empty source set.
+	sourceIDs := snapshot.Package.SourceEventIDs
+	if sourceIDs == nil {
+		sourceIDs = []string{}
+	}
+	sources, err := json.Marshal(sourceIDs)
 	if err != nil {
 		return fmt.Errorf("marshal snapshot source ids: %w", err)
 	}

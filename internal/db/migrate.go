@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 )
 
 // Migrate runs database migrations.
@@ -40,7 +42,30 @@ func Migrate(db *sql.DB, schemaPath string) error {
 		return fmt.Errorf("failed to read schema file: %w", err)
 	}
 
-	// Execute schema in a transaction. Idempotent by design (see above).
+	// Execute the schema transaction with a short retry on transient
+	// SQLITE_BUSY. A concurrent writer — for example the worker replaying
+	// buffers while the gateway restarts mid-turn — can hold the write lock
+	// longer than busy_timeout; a few bounded retries let the gateway boot
+	// instead of aborting startup on a transient lock.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		lastErr = runMigrationTx(db, schema)
+		if lastErr == nil {
+			return nil
+		}
+		if !isBusyError(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+// runMigrationTx applies the idempotent schema and records the migration in a
+// single transaction. Idempotent by design (see Migrate docs).
+func runMigrationTx(db *sql.DB, schema []byte) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -63,6 +88,20 @@ func Migrate(db *sql.DB, schemaPath string) error {
 	}
 
 	return nil
+}
+
+// isBusyError reports whether err is a transient SQLite write-lock contention
+// (SQLITE_BUSY / SQLITE_LOCKED). Keep the match narrow so real failures still
+// abort startup.
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "database is busy")
 }
 
 // CheckMigrationIdempotency verifies that running migrations twice doesn't cause errors
