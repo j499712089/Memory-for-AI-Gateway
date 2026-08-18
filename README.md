@@ -67,7 +67,7 @@ go test ./...
 ## Database
 
 - **Global DB**: `F:\memory_plus\.runtime\memory-gateway.db`
-- **Team DBs**: `F:\memory_plus\teams\{team_id}\memory.db`
+- **Team DBs**: `F:\memory_plus\90_运行数据\teams\{team_id}\memory.db`
 
 Both use WAL mode for concurrent read/write operations.
 

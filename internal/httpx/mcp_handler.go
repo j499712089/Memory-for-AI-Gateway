@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,7 +34,7 @@ type MCPHandler struct {
 }
 
 func NewMCPHandler(globalDB *sql.DB, memoryRoot string) *MCPHandler {
-	teamsDir := filepath.Join(memoryRoot, "teams")
+	teamsDir := paths.TeamsDir(memoryRoot)
 	return &MCPHandler{globalDB: globalDB, teamsDir: teamsDir, memoryRoot: memoryRoot}
 }
 

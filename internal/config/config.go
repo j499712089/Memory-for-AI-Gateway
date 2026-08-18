@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"gateway/internal/paths"
 )
 
 type Config struct {
@@ -57,7 +59,7 @@ func LoadConfig() (*Config, error) {
 		},
 		Database: DatabaseConfig{
 			GlobalDBPath: filepath.Join(baseDir, ".runtime", "memory-gateway.db"),
-			TeamsDir:     filepath.Join(baseDir, "teams"),
+			TeamsDir:     paths.TeamsDir(baseDir),
 		},
 		Secrets: SecretsConfig{
 			SecretsDir: filepath.Join(baseDir, ".runtime", "secrets"),

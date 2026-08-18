@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -84,7 +83,7 @@ func NewGatewayHandler(db *sql.DB, secretsManager *secrets.Manager, memoryRoot s
 		secretsManager: secretsManager,
 		memoryRoot:     memoryRoot,
 		upstreamClient: adapter.NewUpstreamClient(120 * time.Second),
-		teamsDir:       filepath.Join(memoryRoot, "teams"),
+		teamsDir:       paths.TeamsDir(memoryRoot),
 		tokenBudget:    tokenBudget,
 		refineQueue:    worker.NewQueue(db, 30*time.Second),
 	}

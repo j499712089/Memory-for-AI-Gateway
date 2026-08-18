@@ -135,7 +135,7 @@ func TestBindingResolverQuarantinesMissingBindingAndQueuesRepair(t *testing.T) {
 func TestRetrievalFiltersACLAndTokenBudget(t *testing.T) {
 	database, root := phase3Database(t)
 	defer database.Close()
-	teamDB, err := db.OpenTeamDB(filepath.Join(root, "teams"), "team-1")
+	teamDB, err := db.OpenTeamDB(filepath.Join(root, "90_运行数据", "teams"), "team-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRetrievalFiltersACLAndTokenBudget(t *testing.T) {
 func TestInjectionPackageAndSnapshotAreAuditable(t *testing.T) {
 	database, root := phase3Database(t)
 	defer database.Close()
-	teamDB, err := db.OpenTeamDB(filepath.Join(root, "teams"), "team-1")
+	teamDB, err := db.OpenTeamDB(filepath.Join(root, "90_运行数据", "teams"), "team-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestWatchdogEnqueuesMissingResponseAndReclaimsLease(t *testing.T) {
 func TestWikiFTSResultsCarryTeamAndACLMetadata(t *testing.T) {
 	database, root := phase3Database(t)
 	defer database.Close()
-	teamDB, err := db.OpenTeamDB(filepath.Join(root, "teams"), "team-1")
+	teamDB, err := db.OpenTeamDB(filepath.Join(root, "90_运行数据", "teams"), "team-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +618,7 @@ func TestRecoveryMarksUnsafeEventPathsInconsistent(t *testing.T) {
 func TestCodeRepoUpsertAndImpactDepth(t *testing.T) {
 	database, root := phase3Database(t)
 	defer database.Close()
-	teamDB, err := db.OpenTeamDB(filepath.Join(root, "teams"), "team-1")
+	teamDB, err := db.OpenTeamDB(filepath.Join(root, "90_运行数据", "teams"), "team-1")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -66,7 +66,7 @@ func newLLMInjectionGateway(t *testing.T, upstreamURL string, tokenBudgetEnv str
 	}
 
 	// Seed a team memory DB with assets so retrieval has something to return.
-	teamDB, err := db.OpenTeamDB(filepath.Join(memoryRoot, "teams"), teamID)
+	teamDB, err := db.OpenTeamDB(filepath.Join(memoryRoot, "90_运行数据", "teams"), teamID)
 	if err != nil {
 		t.Fatalf("open team db: %v", err)
 	}

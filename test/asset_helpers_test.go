@@ -14,7 +14,7 @@ import (
 // assets schema and the Phase 3b sub-track schema applied.
 func newAssetTeamDB(t *testing.T, database *db.DB, root string) *sql.DB {
 	t.Helper()
-	teamDB, err := db.OpenTeamDB(filepath.Join(root, "teams"), "team-1")
+	teamDB, err := db.OpenTeamDB(filepath.Join(root, "90_运行数据", "teams"), "team-1")
 	if err != nil {
 		t.Fatalf("open team database: %v", err)
 	}

@@ -120,7 +120,7 @@ func TestCompleteTerminalQueueFailureRecoversL1Refine(t *testing.T) {
 		t.Fatalf("process recovered refine job: processed=%v err=%v", processed, err)
 	}
 	var assets int
-	teamDB, err := db.OpenTeamDB(filepath.Join(root, "teams"), "team-1")
+	teamDB, err := db.OpenTeamDB(filepath.Join(root, "90_运行数据", "teams"), "team-1")
 	if err != nil {
 		t.Fatalf("open team database: %v", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"gateway/internal/codegraph"
 	"gateway/internal/db"
 	"gateway/internal/idgen"
+	"gateway/internal/paths"
 	"gateway/internal/skill"
 	"gateway/internal/wiki"
 )
@@ -29,7 +30,7 @@ var (
 
 // AssetWorkerDeps bundles the dependencies shared by the six Phase 3b asset
 // sub-track handlers. A nil TeamDB resolver falls back to opening the team
-// database under <memoryRoot>/teams/<teamID>/memory.db.
+// database under <memoryRoot>/90_运行数据/teams/<teamID>/memory.db.
 type AssetWorkerDeps struct {
 	GlobalDB   *sql.DB
 	TeamDB     func(teamID string) (*sql.DB, error)
@@ -50,7 +51,7 @@ func (d AssetWorkerDeps) resolveTeamDB(teamID string) (*sql.DB, error) {
 	if d.MemoryRoot == "" {
 		return nil, fmt.Errorf("memory root is required to resolve team database")
 	}
-	teamDB, err := db.OpenTeamDB(d.MemoryRoot+"/teams", teamID)
+	teamDB, err := db.OpenTeamDB(paths.TeamsDir(d.MemoryRoot), teamID)
 	if err != nil {
 		return nil, err
 	}
