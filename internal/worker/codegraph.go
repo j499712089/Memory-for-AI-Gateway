@@ -16,6 +16,7 @@ import (
 type CodeGraphPayload struct {
 	TeamID string `json:"team_id"`
 	RepoID string `json:"repo_id"`
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 // EnqueueCodeGraphIncremental queues a codegraph_incremental job for a repo.
@@ -28,7 +29,7 @@ func EnqueueCodeGraphIncremental(ctx context.Context, queue *Queue, payload Code
 		TeamID:       payload.TeamID,
 		AssetID:      payload.RepoID,
 		AssetType:    "codegraph",
-		PartitionKey: "codegraph:" + payload.TeamID + ":" + payload.RepoID,
+		PartitionKey: codeGraphPartition(payload.TeamID, payload.TurnID, payload.RepoID),
 		Payload:      payload,
 	})
 }

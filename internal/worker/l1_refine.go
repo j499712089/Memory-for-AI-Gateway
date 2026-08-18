@@ -360,6 +360,13 @@ func routeRefinedAssets(ctx context.Context, teamDB *sql.DB, queue *Queue, deps 
 	if queue == nil || len(assets) == 0 {
 		return nil
 	}
+	// Enqueue the codegraph sweep first. A later wiki/skill/promotion write may
+	// encounter a transient SQLite lock; keeping this trigger ahead of those
+	// writes ensures a retry can repair the remaining routes without losing the
+	// V6.3 codegraph handoff.
+	if err := enqueueCodeGraphSweep(ctx, teamDB, queue, payload.TeamID, payload.TurnID); err != nil {
+		return err
+	}
 	for _, item := range assets {
 		fact := item.Fact
 		wikiPayload := WikiBuildPayload{
@@ -419,9 +426,13 @@ func routeRefinedAssets(ctx context.Context, teamDB *sql.DB, queue *Queue, deps 
 		}
 	}
 
-	// CodeGraph receives a team-level sweep even before the first repository is
-	// registered. The worker treats an empty RepoID as a safe no-op, preserving
-	// the sub-track trigger without manufacturing a permanently failing job.
+	return enqueueGitCommitIfNeeded(ctx, queue, deps, payload.TeamID)
+}
+
+// enqueueCodeGraphSweep records the codegraph sub-track trigger for every
+// refine batch. A team-level empty-repository sweep is a valid no-op; when
+// repositories exist, each repository gets its own idempotent incremental job.
+func enqueueCodeGraphSweep(ctx context.Context, teamDB *sql.DB, queue *Queue, teamID, turnID string) error {
 	rows, err := teamDB.QueryContext(ctx, `SELECT id FROM code_repos ORDER BY id`)
 	if err != nil {
 		return fmt.Errorf("list code repositories: %w", err)
@@ -434,9 +445,9 @@ func routeRefinedAssets(ctx context.Context, teamDB *sql.DB, queue *Queue, deps 
 			return fmt.Errorf("scan code repository: %w", err)
 		}
 		if _, err := enqueueUniqueJob(ctx, queue, Job{
-			Queue: "codegraph_incremental", TeamID: payload.TeamID, AssetID: repoID,
-			AssetType: "codegraph", PartitionKey: "codegraph:" + payload.TeamID + ":" + repoID,
-			Payload: CodeGraphPayload{TeamID: payload.TeamID, RepoID: repoID},
+			Queue: "codegraph_incremental", TeamID: teamID, AssetID: repoID,
+			AssetType: "codegraph", PartitionKey: codeGraphPartition(teamID, turnID, repoID),
+			Payload: CodeGraphPayload{TeamID: teamID, RepoID: repoID, TurnID: turnID},
 		}); err != nil {
 			return fmt.Errorf("enqueue codegraph: %w", err)
 		}
@@ -447,21 +458,38 @@ func routeRefinedAssets(ctx context.Context, teamDB *sql.DB, queue *Queue, deps 
 	}
 	if repoCount == 0 {
 		if _, err := enqueueUniqueJob(ctx, queue, Job{
-			Queue: "codegraph_incremental", TeamID: payload.TeamID,
-			AssetType: "codegraph", PartitionKey: "codegraph:" + payload.TeamID + ":all",
-			Payload: CodeGraphPayload{TeamID: payload.TeamID},
+			Queue: "codegraph_incremental", TeamID: teamID,
+			AssetType: "codegraph", PartitionKey: codeGraphPartition(teamID, turnID, "all"),
+			Payload: CodeGraphPayload{TeamID: teamID, TurnID: turnID},
 		}); err != nil {
 			return fmt.Errorf("enqueue codegraph team sweep: %w", err)
 		}
 	}
+	return nil
+}
 
+func codeGraphPartition(teamID, turnID, repoID string) string {
+	teamID = strings.TrimSpace(teamID)
+	repoID = strings.TrimSpace(repoID)
+	if repoID == "" {
+		repoID = "all"
+	}
+	if turnID = strings.TrimSpace(turnID); turnID != "" {
+		return "codegraph:" + teamID + ":" + turnID + ":" + repoID
+	}
+	// Direct repository-triggered jobs have no refine turn to scope them to;
+	// preserve their existing repository-level idempotence in that case.
+	return "codegraph:" + teamID + ":" + repoID
+}
+
+func enqueueGitCommitIfNeeded(ctx context.Context, queue *Queue, deps AssetWorkerDeps, teamID string) error {
 	if deps.VaultPath != "" && deps.GlobalDB != nil {
 		pending, err := HasPendingGitCommit(ctx, deps.GlobalDB)
 		if err != nil {
 			return fmt.Errorf("check git commit queue: %w", err)
 		}
 		if !pending {
-			if _, err := EnqueueGitCommit(ctx, queue, GitCommitPayload{TeamID: payload.TeamID, Reason: "post-refine batch commit"}); err != nil {
+			if _, err := EnqueueGitCommit(ctx, queue, GitCommitPayload{TeamID: teamID, Reason: "post-refine batch commit"}); err != nil {
 				return fmt.Errorf("enqueue git commit: %w", err)
 			}
 		}

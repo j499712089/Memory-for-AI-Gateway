@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -67,14 +68,56 @@ func (p *Processor) Run(ctx context.Context, workerID string, interval time.Dura
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	busyBackoff := 100 * time.Millisecond
 	for {
 		if _, err := p.ProcessOnce(ctx, workerID); err != nil {
-			return err
+			// SQLite can briefly reject BEGIN IMMEDIATE/UPDATE while the gateway,
+			// watchdog or another worker is committing. A transient lock must not
+			// kill the long-lived worker; retry the poll and let the queue lease
+			// recovery handle any claim whose failure update was also blocked.
+			if !isTransientSQLiteBusy(err) {
+				return err
+			}
+			timer := time.NewTimer(busyBackoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
+			if busyBackoff < time.Second {
+				busyBackoff *= 2
+				if busyBackoff > time.Second {
+					busyBackoff = time.Second
+				}
+			}
+			continue
 		}
+		busyBackoff = 100 * time.Millisecond
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
 		}
 	}
+}
+
+// isTransientSQLiteBusy recognizes the modernc SQLite errors returned when a
+// concurrent writer briefly owns the database lock. Keep this deliberately
+// narrow so permanent handler failures still stop a misconfigured worker.
+func isTransientSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "sqlite_busy") ||
+		strings.Contains(message, "sqlite_locked") ||
+		strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database table is locked") ||
+		strings.Contains(message, "database is busy")
 }
