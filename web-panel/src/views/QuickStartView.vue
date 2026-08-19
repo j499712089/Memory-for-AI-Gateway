@@ -4,6 +4,9 @@ import { useRouter } from 'vue-router'
 import { useTeamsStore } from '@/stores/teams'
 import { useApiKeysStore } from '@/stores/apiKeys'
 import { useIdentityCardsStore } from '@/stores/identityCards'
+import AppIcon from '@/components/AppIcon.vue'
+import ConnectionTestPanel from '@/components/ConnectionTestPanel.vue'
+import SetupCompletePanel from '@/components/SetupCompletePanel.vue'
 import type { TeamCreateInput, ApiKeyCreateInput, IdentityCardCreateInput } from '@/api/types'
 
 const router = useRouter()
@@ -20,11 +23,9 @@ const keyScopes = ref(['memories:read', 'memories:write'])
 const cardName = ref('')
 const cardPersona = ref('')
 const agentId = ref('')
-const testResult = ref('')
 const submitting = ref(false)
 const createdTeamId = ref('')
 const createdKeyValue = ref('')
-const createdCardId = ref('')
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8096'
 
 const canProceed = computed(() => {
@@ -77,27 +78,10 @@ async function handleStep3() {
       boundaries: '遵守用户指令',
       agent_id: agentId.value || undefined,
     }
-    const card = await cardsStore.createCard(createdTeamId.value, input)
-    createdCardId.value = card.id
+    await cardsStore.createCard(createdTeamId.value, input)
     currentStep.value = 4
   } finally {
     submitting.value = false
-  }
-}
-
-async function testConnection() {
-  testResult.value = '测试中...'
-  try {
-    const response = await fetch(`${apiBase}/api/health`, {
-      headers: { 'Authorization': `Bearer ${createdKeyValue.value}` }
-    })
-    if (response.ok) {
-      testResult.value = '✅ 连接成功！API Key 工作正常'
-    } else {
-      testResult.value = `❌ 连接失败：${response.status} ${response.statusText}`
-    }
-  } catch (e) {
-    testResult.value = `❌ 连接失败：${e instanceof Error ? e.message : String(e)}`
   }
 }
 
@@ -232,7 +216,10 @@ onMounted(async () => {
         <p class="text-sm text-gray-500">身份卡片定义 AI 助手的身份和记忆存储位置</p>
       </div>
       <div v-if="createdKeyValue" class="rounded bg-yellow-50 p-3 text-sm">
-        <div class="font-medium text-yellow-800">⚠️ 请保存您的 API Key（仅展示一次）</div>
+        <div class="flex items-center gap-2 font-medium text-yellow-800">
+          <AppIcon class="h-4 w-4 shrink-0" name="triangle-alert" />
+          <span>请保存您的 API Key（仅展示一次）</span>
+        </div>
         <div class="mt-2 overflow-x-auto rounded bg-white p-2 font-mono text-xs">{{ createdKeyValue }}</div>
       </div>
       <div class="space-y-3">
@@ -282,73 +269,20 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div v-if="currentStep === 4" class="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-      <div>
-        <h2 class="text-lg font-medium">步骤 4：测试 API 调用</h2>
-        <p class="text-sm text-gray-500">验证 API Key 是否正常工作</p>
-      </div>
-      <div class="rounded bg-gray-50 p-4">
-        <div class="text-sm font-medium text-gray-700">使用您的 API Key 测试连接：</div>
-        <pre class="mt-2 overflow-x-auto rounded bg-white p-3 font-mono text-xs">curl -H "Authorization: Bearer {{ createdKeyValue }}" \
-  {{ apiBase }}/api/health</pre>
-      </div>
-      <button
-        class="w-full rounded bg-green-600 px-4 py-2 text-sm text-white hover:bg-green-500"
-        @click="testConnection"
-      >
-        🔌 测试连接
-      </button>
-      <div v-if="testResult" class="rounded border px-3 py-2 text-sm" :class="testResult.startsWith('✅') ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700'">
-        {{ testResult }}
-      </div>
-      <div class="flex justify-between">
-        <button
-          class="rounded border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
-          @click="currentStep = 3"
-        >
-          上一步
-        </button>
-        <button
-          class="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500"
-          @click="currentStep = 5"
-        >
-          下一步
-        </button>
-      </div>
-    </div>
+    <ConnectionTestPanel
+      v-if="currentStep === 4"
+      :api-base="apiBase"
+      :api-key="createdKeyValue"
+      @back="currentStep = 3"
+      @next="currentStep = 5"
+    />
 
-    <div v-if="currentStep === 5" class="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-      <div class="text-center">
-        <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-100">
-          <svg class="h-8 w-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-          </svg>
-        </div>
-        <h2 class="mt-4 text-lg font-medium">配置完成！</h2>
-        <p class="mt-2 text-sm text-gray-500">您已成功完成 Memory Gateway 的基础配置</p>
-      </div>
-      <div class="space-y-2 rounded bg-gray-50 p-4 text-sm">
-        <div class="font-medium text-gray-700">✅ 完成的配置：</div>
-        <ul class="ml-4 list-disc space-y-1 text-gray-600">
-          <li>创建了 Team：{{ teamName }}</li>
-          <li>生成了 API Key：{{ keyName }}</li>
-          <li>创建了身份卡片：{{ cardName }}</li>
-        </ul>
-      </div>
-      <div class="space-y-2 rounded border border-blue-200 bg-blue-50 p-4 text-sm">
-        <div class="font-medium text-blue-800">📚 下一步推荐：</div>
-        <ul class="ml-4 list-disc space-y-1 text-blue-700">
-          <li>查看 <a href="/api-keys" class="underline">API Keys 管理</a> 了解更多权限配置</li>
-          <li>访问 <a href="/identity-cards" class="underline">身份卡片</a> 管理您的 AI 身份</li>
-          <li>阅读 <a href="https://github.com/j499712089/Memory-for-AI" target="_blank" class="underline">使用文档</a> 了解高级功能</li>
-        </ul>
-      </div>
-      <button
-        class="w-full rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500"
-        @click="goToDashboard"
-      >
-        进入管理面板
-      </button>
-    </div>
+    <SetupCompletePanel
+      v-if="currentStep === 5"
+      :card-name="cardName"
+      :key-name="keyName"
+      :team-name="teamName"
+      @finish="goToDashboard"
+    />
   </div>
 </template>

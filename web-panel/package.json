@@ -6,6 +6,7 @@
   "description": "Memory Gateway MVP — Web 管理面板 (团队/身份卡/API Key/上游通道/健康看板)",
   "scripts": {
     "dev": "vite",
+    "lint": "node scripts/check-no-emoji.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",

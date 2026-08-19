@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 明文 API Key 一次性展示 + 复制（安全纪律：明文只出现这一次，刷新即失）
 import { ref } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{
   keyValue: string
@@ -29,8 +30,9 @@ async function copy() {
 <template>
   <div class="rounded-lg border border-amber-300 bg-amber-50 p-4">
     <div class="mb-2 flex items-center justify-between">
-      <span class="text-sm font-medium text-amber-800">
-        ⚠️ 明文 Key 仅此一次展示，关闭后无法再次查看
+      <span class="flex items-center gap-2 text-sm font-medium text-amber-800">
+        <AppIcon class="h-4 w-4 shrink-0" name="triangle-alert" />
+        <span>明文 Key 仅此一次展示，关闭后无法再次查看</span>
       </span>
       <button class="text-sm text-amber-700 hover:underline" @click="emit('dismiss')">关闭</button>
     </div>
