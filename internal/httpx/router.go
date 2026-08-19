@@ -19,6 +19,8 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 	adminHandler := NewAdminHandler(db, secretsManager)
 	gatewayHandler := NewGatewayHandler(db, secretsManager, memoryRoot)
 	mcpHandler := NewMCPHandler(db, memoryRoot)
+	systemHandler := NewSystemHandler(db)
+	identityHandler := NewIdentityHandler(db)
 
 	// Create auth middleware
 	authMgr := auth.NewMiddleware(db)
@@ -39,6 +41,21 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 		api.GET("/api-keys", adminHandler.HandleListAPIKeys)
 		api.POST("/api-keys", adminHandler.HandleCreateAPIKey)
 		api.GET("/recording-health", healthHandler.HandleRecordingHealth)
+
+		// System Management
+		api.POST("/system/service/start", systemHandler.HandleServiceStart)
+		api.POST("/system/service/stop", systemHandler.HandleServiceStop)
+		api.POST("/system/service/restart", systemHandler.HandleServiceRestart)
+		api.GET("/system/service/status", systemHandler.HandleServiceStatus)
+		api.PUT("/system/autostart", systemHandler.HandleSetAutostart)
+		api.GET("/system/logs", systemHandler.HandleGetLogs)
+		api.GET("/system/config/export", systemHandler.HandleExportConfig)
+		api.POST("/system/config/import", systemHandler.HandleImportConfig)
+		api.GET("/system/config", systemHandler.HandleGetConfig)
+
+		// Identity Cards - Agent Binding
+		api.POST("/identity-cards/:id/bind-agent", identityHandler.HandleBindAgent)
+		api.POST("/identity-cards/:id/test-connection", identityHandler.HandleTestConnection)
 
 		// MCP internal service API (consumed by the MCP Server :8097).
 		// Auth inherited from the /api group; scope check is route-local.
