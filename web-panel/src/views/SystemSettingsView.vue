@@ -97,7 +97,9 @@ async function toggleAutostart() {
 
 async function exportConfig() {
   try {
-    const res = await fetch(`${apiBase}/api/system/config/export`)
+    const res = await fetch(`${apiBase}/api/system/backup`, {
+      method: 'POST',
+    })
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
@@ -119,7 +121,7 @@ function handleImportConfig(event: Event) {
   reader.onload = async (e) => {
     try {
       const config = JSON.parse(e.target?.result as string)
-      const res = await fetch(`${apiBase}/api/system/config/import`, {
+      const res = await fetch(`${apiBase}/api/system/restore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)

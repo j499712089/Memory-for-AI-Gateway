@@ -49,8 +49,8 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 		api.GET("/system/service/status", systemHandler.HandleServiceStatus)
 		api.PUT("/system/autostart", systemHandler.HandleSetAutostart)
 		api.GET("/system/logs", systemHandler.HandleGetLogs)
-		api.GET("/system/config/export", systemHandler.HandleExportConfig)
-		api.POST("/system/config/import", systemHandler.HandleImportConfig)
+		api.POST("/system/backup", systemHandler.HandleBackup)
+		api.POST("/system/restore", systemHandler.HandleRestore)
 		api.GET("/system/config", systemHandler.HandleGetConfig)
 
 		// Identity Cards - Agent Binding

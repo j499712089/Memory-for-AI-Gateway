@@ -126,7 +126,7 @@ func (h *SystemHandler) HandleServiceRestart(c *gin.Context) {
 // HandleServiceStatus returns the current service status
 func (h *SystemHandler) HandleServiceStatus(c *gin.Context) {
 	status := ServiceStatusResponse{
-		Running: true,  // If this endpoint responds, service is running
+		Running: true, // If this endpoint responds, service is running
 		PID:     os.Getpid(),
 		Version: "1.0.0",
 	}
@@ -238,8 +238,8 @@ func (h *SystemHandler) HandleGetLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, logs)
 }
 
-// HandleExportConfig exports the current configuration
-func (h *SystemHandler) HandleExportConfig(c *gin.Context) {
+// HandleBackup returns a backup of the current system configuration.
+func (h *SystemHandler) HandleBackup(c *gin.Context) {
 	// Export configuration as JSON
 	config := map[string]interface{}{
 		"exported_at": time.Now().UTC().Format(time.RFC3339),
@@ -251,8 +251,8 @@ func (h *SystemHandler) HandleExportConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, config)
 }
 
-// HandleImportConfig imports configuration from uploaded JSON
-func (h *SystemHandler) HandleImportConfig(c *gin.Context) {
+// HandleRestore validates and restores a system configuration backup.
+func (h *SystemHandler) HandleRestore(c *gin.Context) {
 	var config map[string]interface{}
 	if err := c.ShouldBindJSON(&config); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -293,7 +293,11 @@ func checkAutostartEnabled() bool {
 
 func getDBPath(db *sql.DB) string {
 	// Query database file path from SQLite
-	var path string
-	db.QueryRow("PRAGMA database_list").Scan(nil, nil, &path)
+	var seq int
+	var name, path string
+	err := db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &path)
+	if err != nil {
+		return ""
+	}
 	return path
 }
