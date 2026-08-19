@@ -1,9 +1,30 @@
 # Memory Gateway
 
-**统一 LLM 网关与记忆管理系统** — 支持多团队隔离、API Key 管理、请求录入与幂等性保障。
+AI 记忆管理网关 - 为 LLM 应用提供跨会话记忆存储和身份管理
 
 [![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+---
+
+## 快速开始（5 分钟）
+
+**Windows 用户一键启动：**
+
+1. 下载并解压到任意目录
+2. 双击 `start-memory-gateway.bat`
+3. 等待浏览器自动打开管理面板
+4. 按照向导完成 6 步配置：
+   - 创建 Team
+   - 生成 API Key
+   - 创建身份卡片
+   - 测试连接
+   - **配置上游通道**（粘贴 Anthropic/OpenAI Key）
+   - 完成
+
+**立即可用！** 5 分钟内完成从下载到首次调用。
+
+详细指南：[QUICK_START.md](./docs/QUICK_START.md)
 
 ---
 
@@ -19,7 +40,7 @@ Memory Gateway 是一个企业级 LLM 网关，提供：
 
 ---
 
-## 快速启动
+## 开发环境启动
 
 ### 环境要求
 
