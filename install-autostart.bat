@@ -22,13 +22,14 @@ echo [INFO] Startup folder: %STARTUP%
 echo.
 
 REM Create VBScript for silent startup
+set GATEWAY_DIR=%~dp0
 set VBS_FILE=%STARTUP%\MemoryGateway.vbs
 echo [INFO] Creating auto-start script...
 
 (
 echo ' Memory Gateway Auto-Start
 echo ' Launches the gateway service silently on Windows login
-echo CreateObject^("WScript.Shell"^).Run "%~dp0start-gateway.bat", 0, False
+echo CreateObject^("WScript.Shell"^).Run "%GATEWAY_DIR%start-gateway.bat", 0, False
 ) > "%VBS_FILE%"
 
 if exist "%VBS_FILE%" (
