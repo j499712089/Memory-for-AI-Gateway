@@ -61,6 +61,6 @@ describe('SetupCompletePanel', () => {
 
     expect(wrapper.find('[data-icon="clipboard-check"]').exists()).toBe(true)
     expect(wrapper.find('[data-icon="book-open"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toMatch(/[\u{1F1E6}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    expect(wrapper.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
   })
 })

@@ -69,7 +69,7 @@ describe('ApiKeyReveal', () => {
   it('用 SVG 告警图标替代功能性 emoji', () => {
     const wrapper = mount(ApiKeyReveal, { props: { keyValue: 'mgw-top-secret' } })
     expect(wrapper.find('[data-icon="triangle-alert"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toMatch(/[\u{1F1E6}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    expect(wrapper.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
   })
 
   it('明文默认隐藏，点击显示按钮后才出现', async () => {

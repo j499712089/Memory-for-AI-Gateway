@@ -3,7 +3,7 @@ import { extname, join, relative, resolve } from 'node:path'
 
 const sourceRoot = resolve(process.cwd(), 'src')
 const sourceExtensions = new Set(['.css', '.html', '.js', '.jsx', '.mjs', '.scss', '.svelte', '.ts', '.tsx', '.vue'])
-const emojiPattern = /[\u{1F1E6}-\u{1FAFF}\u{2600}-\u{27BF}]/gu
+const emojiPattern = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu
 
 async function collectSourceFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
