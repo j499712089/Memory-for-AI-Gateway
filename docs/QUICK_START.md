@@ -1,175 +1,69 @@
-# Memory Gateway 快速开始指南
+# Memory Gateway 快速开始
 
-本指南帮助您在 5 分钟内完成 Memory Gateway 的安装和首次调用。
+本指南面向 Windows 发布包用户。完成下载、配置和首次调用通常不超过 5 分钟；首次打开管理面板目标为 15 秒内。
 
-## 前置要求
+## 1. 下载、解压并启动
 
-- Windows 10/11
-- Node.js 16+（前端面板需要）
-- 有效的 Anthropic/OpenAI API Key（上游通道）
+1. 从 GitHub Releases 下载完整压缩包，不要只下载 `gateway.exe`。
+2. 解压到没有中文和空格的目录，例如 `F:\memory_plus\gateway`。
+3. 确认根目录包含 `gateway.exe`、`.env.example`、`start-memory-gateway.bat`、`stop-memory-gateway.bat`、`check-status.bat` 和 `web-panel`。
+4. 双击 `start-memory-gateway.bat`。
 
-## 第一步：下载和启动
+脚本会自动复制 `.env.example` 为 `.env`（若不存在）、创建 `.runtime/secrets`、启动 Gateway 和 Web 面板，并打开 `http://127.0.0.1:5173/quick-start`。后端健康检查地址为 `http://127.0.0.1:8096/health`。
 
-1. 从 [GitHub Releases](https://github.com/j499712089/Memory-for-AI/releases) 下载最新版本
-2. 解压到任意目录（例如 `F:\memory_plus\gateway`）
-3. 双击 `start-memory-gateway.bat`
-
-**启动脚本会自动完成：**
-- 检查并创建 `.env` 文件
-- 创建数据目录（`data/.runtime/secrets` 等）
-- 检查前端依赖（首次运行会自动 `npm install`）
-- 启动后端服务（端口 8096）
-- 启动前端面板（端口 5173）
-- 等待服务就绪后打开浏览器
-
-**首次启动大约需要 10-15 秒**
-
-## 第二步：完成向导配置
-
-浏览器会自动打开 `http://localhost:5173/quick-start`，按照 6 步向导操作：
+## 2. Web 面板六步配置
 
 ### 步骤 1：创建 Team
 
-- **Team 名称**：例如「我的 AI 助手团队」
-- **Slug**：例如 `my-team`（仅限小写字母、数字、连字符）
-- **描述**：可选
+填写 Team 名称、唯一 slug 和可选描述。Team 是 API Key、身份卡片、上游通道和数据的隔离边界。
 
-### 步骤 2：生成 API Key
+### 步骤 2：生成下游 API Key
 
-- **Key 名称**：例如「Production Key」
-- **权限范围**：勾选 `memories:read` 和 `memories:write`
+为 Team 创建调用 Key，选择所需权限。明文只显示一次，请立即保存。这个 Key 通常以 `gw_` 开头，应用调用 Gateway 时放在 `Authorization: Bearer <key>` 中。
 
-**重要：** 生成后立即复制保存 API Key（`gw_xxxxx`），它只展示一次。
+### 步骤 3：配置上游通道
 
-### 步骤 3：创建身份卡片
+选择 Anthropic、OpenAI 或 Codex，粘贴从对应供应商获取的上游 Key，点击测试连接并保存。上游 Key 只保存在 Gateway 的运行时 secrets 目录，不要提交到代码仓库或发给客户端。此步可跳过，之后在“上游通道”页面完成。
 
-- **身份卡片名称**：例如「我的 AI 助手」
-- **Persona**：例如「你是一个专业的技术顾问...」
-- **Agent ID**：可选，用于绑定客户端 Agent
+### 步骤 4：创建身份卡片
 
-### 步骤 4：测试连接
+填写身份卡片名称、Persona 和可选 Agent ID，用于描述调用时的助手身份和行为约束。
 
-点击「测试连接」按钮，验证 API Key 是否正常工作。
+### 步骤 5：验证配置
 
-### 步骤 5：配置上游通道
+回到向导或管理面板，确认 Team、下游 API Key、上游通道和身份卡片均显示为已配置；使用“测试连接”确认 Gateway 能访问上游服务。
 
-**这是新增步骤，无需手动创建文件！**
+### 步骤 6：开始调用
 
-- 选择服务商：Anthropic / OpenAI / Codex
-- 粘贴您的上游 API Key
-- 点击「测试连接」验证
-- 保存（自动存储到 `data/.runtime/secrets/<team_id>_<provider>.key`）
-
-**可以跳过此步，稍后在管理面板配置。**
-
-### 步骤 6：完成
-
-显示配置摘要，点击「进入管理面板」。
-
-## 第三步：首次 LLM 调用
-
-使用生成的 API Key（`gw_xxxxx`）调用网关：
+使用下游 API Key 调用 Gateway。以下示例调用 Anthropic 兼容端点：
 
 ```bash
-curl -X POST http://127.0.0.1:8096/v1/messages \
-  -H "Authorization: Bearer gw_xxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-3-5-sonnet-20241022",
-    "max_tokens": 1024,
-    "messages": [
-      {"role": "user", "content": "你好，介绍一下你自己"}
-    ]
-  }'
+curl -X POST http://127.0.0.1:8096/v1/messages ^
+  -H "Authorization: Bearer gw_your_key" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"claude-3-5-sonnet-20241022\",\"max_tokens\":128,\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"
 ```
 
-**成功返回：**
-```json
-{
-  "id": "msg_xxxxx",
-  "type": "message",
-  "role": "assistant",
-  "content": [...]
-}
-```
+## 3. 日常操作
 
-## 常见问题
+- 停止服务：双击 `stop-memory-gateway.bat`。
+- 检查服务：双击 `check-status.bat`。
+- 管理上游通道：打开 `http://127.0.0.1:5173/upstream-keys`。
+- 管理下游 API Key：打开 `http://127.0.0.1:5173/api-keys`。
+- 管理身份卡片：打开 `http://127.0.0.1:5173/identity-cards`。
 
-### Q1: 启动后浏览器没有自动打开？
+## 4. 数据、端口与备份
 
-手动访问 `http://localhost:5173/quick-start`
+Gateway API 使用 8096 端口，Web 面板使用 5173 端口。运行数据默认位于 `${MEMORY_PLUS_DIR}/.runtime/`，团队数据位于 `${MEMORY_PLUS_DIR}/90_运行数据/teams/`。升级前先停止服务，并复制 `.runtime/memory-gateway.db` 到备份目录；至少保留最近 7 天的每日备份。
 
-### Q2: 前端启动失败？
+回滚时恢复上一版 `gateway.exe` 和对应数据库备份，随后重新运行 `start-memory-gateway.bat`。
 
-检查 Node.js 版本（需要 16+）：
-```bash
-node --version
-```
+## 5. 故障排查
 
-### Q3: 上游 Key 和下游 API Key 有什么区别？
+- 浏览器打不开：运行 `check-status.bat`，确认 5173 正在监听；也可直接访问 `http://127.0.0.1:5173/quick-start`。
+- 后端不健康：访问 `/health`，检查 8096 是否被占用、`.env` 的 `MEMORY_PLUS_DIR` 是否存在且可写。
+- 前端启动失败：确认 Node.js 18+，进入 `web-panel` 运行 `npm install` 后重试。
+- 调用返回认证错误：确认客户端使用的是 Gateway 生成的下游 Key，而不是供应商上游 Key。
+- 调用返回上游错误：在“上游通道”页面重新测试 Key，并检查供应商额度和网络连接。
 
-- **上游 Key**：您从 Anthropic/OpenAI 获取的真实 API Key（Team 级别）
-- **下游 API Key**：Gateway 生成的 Key（`gw_xxxxx`），用于客户端调用网关
-
-### Q4: 如何停止服务？
-
-双击 `stop-memory-gateway.bat`
-
-### Q5: 如何检查服务状态？
-
-双击 `check-status.bat`
-
-## 高级配置
-
-### 管理上游通道
-
-访问 `http://localhost:5173/upstream-keys` 可以：
-- 查看已配置的上游通道
-- 添加多个服务商的 Key
-- 测试连接状态
-- 删除过期的 Key
-
-### 管理 API Keys
-
-访问 `http://localhost:5173/api-keys` 可以：
-- 查看所有下游 API Key
-- 生成新的 Key（可指定不同权限）
-- 禁用/删除 Key
-
-### 管理身份卡片
-
-访问 `http://localhost:5173/identity-cards` 可以：
-- 查看所有身份卡片
-- 编辑 Persona 和职责
-- 绑定/解绑 Agent ID
-
-## 下一步
-
-- 阅读 [API 文档](./API.md) 了解完整的 API 能力
-- 阅读 [架构文档](./02_architecture_design.md) 了解系统设计
-- 查看 [部署指南](./05_deployment_guide.md) 了解生产环境部署
-
-## 故障排查
-
-### 后端启动失败
-
-1. 检查端口占用：`netstat -ano | findstr :8096`
-2. 查看日志：`logs/gateway.log`
-3. 确认 `.env` 文件存在
-
-### 前端启动失败
-
-1. 删除 `node_modules` 重新安装：`npm install`
-2. 检查 Node.js 版本：`node --version`（需要 16+）
-3. 查看控制台错误信息
-
-### API 调用失败
-
-1. 确认上游通道已配置（访问 `/upstream-keys`）
-2. 检查 API Key 是否正确（不要混淆上游和下游 Key）
-3. 查看后端日志：`logs/gateway.log`
-
-## 技术支持
-
-- GitHub Issues: https://github.com/j499712089/Memory-for-AI/issues
-- 文档中心: https://github.com/j499712089/Memory-for-AI/tree/main/docs
+更多部署验证和手动启动命令见 [../DEPLOY.md](../DEPLOY.md)。

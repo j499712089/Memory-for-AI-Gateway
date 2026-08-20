@@ -2,29 +2,37 @@
 
 AI 记忆管理网关 - 为 LLM 应用提供跨会话记忆存储和身份管理
 
+## 30 秒快速开始（Windows）
+
+1. 从发布页下载完整压缩包并解压到任意目录。
+2. 打开解压后的 `gateway` 目录，双击 `start-memory-gateway.bat`。
+3. 等待脚本完成检查，浏览器访问 `http://127.0.0.1:5173/quick-start`。
+
+启动脚本会自动创建 `.env`、运行时目录和前端依赖，并启动后端 8096 端口与前端 5173 端口。停止服务双击 `stop-memory-gateway.bat`，查看状态双击 `check-status.bat`。
+
+完整配置步骤见 [docs/QUICK_START.md](./docs/QUICK_START.md)，部署、回滚与故障排查见 [DEPLOY.md](./DEPLOY.md)。
+
+### 发布包必须包含
+
+`gateway.exe`、`.env.example`、`start-memory-gateway.bat`、`stop-memory-gateway.bat`、`check-status.bat`、`web-panel/` 及其 `package.json`。缺少任一批处理文件时，不要按本文档启动，应重新获取完整发布包。
+
+### 两类 API Key
+
+- **上游 Key**：从 Anthropic、OpenAI 或 Codex 获取，配置在 Web 面板的上游通道中，仅供 Gateway 访问模型供应商。
+- **下游 API Key**：在 Web 面板为 Team 生成（通常以 `gw_` 开头），提供给你的应用调用 Gateway；不要把上游 Key 放到客户端。
+
+### 运行端口与数据目录
+
+- 管理面板：`http://127.0.0.1:5173`
+- Gateway API 与健康检查：`http://127.0.0.1:8096`、`/health`
+- 运行数据：`${MEMORY_PLUS_DIR}/.runtime/`，包含 SQLite 数据库、`secrets/` 和 `outbox/`；团队数据位于 `${MEMORY_PLUS_DIR}/90_运行数据/teams/`。
+
+### 回滚与故障排查
+
+升级前停止服务并备份 `.runtime/memory-gateway.db`，保留上一版 `gateway.exe`。出现问题时恢复旧可执行文件和数据库备份，再运行 `start-memory-gateway.bat`。启动失败先运行 `check-status.bat`，检查 8096/5173 端口占用、`.env` 中 `MEMORY_PLUS_DIR` 是否可写，以及 Node.js 18+ 和依赖是否安装；详细命令见 [DEPLOY.md](./DEPLOY.md)。
+
 [![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-
----
-
-## 快速开始（5 分钟）
-
-**Windows 用户一键启动：**
-
-1. 下载并解压到任意目录
-2. 双击 `start-memory-gateway.bat`
-3. 等待浏览器自动打开管理面板
-4. 按照向导完成 6 步配置：
-   - 创建 Team
-   - 生成 API Key
-   - 创建身份卡片
-   - 测试连接
-   - **配置上游通道**（粘贴 Anthropic/OpenAI Key）
-   - 完成
-
-**立即可用！** 5 分钟内完成从下载到首次调用。
-
-详细指南：[QUICK_START.md](./docs/QUICK_START.md)
 
 ---
 
