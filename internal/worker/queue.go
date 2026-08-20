@@ -104,6 +104,8 @@ func EnsureQueueSchema(database *sql.DB) error {
 
 func DefaultPriority(queue string) int {
 	switch queue {
+	case "embedding":
+		return 70
 	case "compensation", "missing_response", "buffer_replay", "binding_fix":
 		return 90
 	case "l1_refine":

@@ -16,9 +16,11 @@ import (
 
 	"gateway/internal/acl"
 	"gateway/internal/db"
+	"gateway/internal/embedding"
 	"gateway/internal/idgen"
 	"gateway/internal/paths"
 	"gateway/internal/retrieval"
+	"gateway/internal/worker"
 
 	"github.com/gin-gonic/gin"
 )
@@ -28,14 +30,15 @@ import (
 // through the retrieval/query layer, the single write tool (memory/append)
 // goes through the same SQLite transaction layer used by the Worker pipeline.
 type MCPHandler struct {
-	globalDB  *sql.DB
-	teamsDir  string
-	memoryRoot string
+	globalDB       *sql.DB
+	teamsDir       string
+	memoryRoot     string
+	embeddingQueue *worker.Queue
 }
 
 func NewMCPHandler(globalDB *sql.DB, memoryRoot string) *MCPHandler {
 	teamsDir := paths.TeamsDir(memoryRoot)
-	return &MCPHandler{globalDB: globalDB, teamsDir: teamsDir, memoryRoot: memoryRoot}
+	return &MCPHandler{globalDB: globalDB, teamsDir: teamsDir, memoryRoot: memoryRoot, embeddingQueue: worker.NewQueue(globalDB, 30*time.Second)}
 }
 
 var safeTeamID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9\-_]{0,63}$`)
@@ -206,15 +209,15 @@ func (h *MCPHandler) HandleMemorySearch(c *gin.Context) {
 			continue
 		}
 		items = append(items, gin.H{
-			"asset_id":        candidate.ID,
-			"asset_type":      candidate.AssetType,
-			"layer":           candidate.Layer,
-			"summary":         candidate.Summary,
-			"visibility":      candidate.Visibility,
+			"asset_id":         candidate.ID,
+			"asset_type":       candidate.AssetType,
+			"layer":            candidate.Layer,
+			"summary":          candidate.Summary,
+			"visibility":       candidate.Visibility,
 			"source_event_ids": candidate.SourceEventIDs,
-			"score":           roundScore(candidate.Score),
-			"version":         candidate.Version,
-			"snippet":         candidate.Snippet,
+			"score":            roundScore(candidate.Score),
+			"version":          candidate.Version,
+			"snippet":          candidate.Snippet,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"results": items, "truncated": result.Truncated})
@@ -368,6 +371,9 @@ func (h *MCPHandler) HandleMemoryAppend(c *gin.Context) {
 	if !created {
 		errorResponse(c, http.StatusConflict, "conflict", "duplicate memory already exists")
 		return
+	}
+	if h.embeddingQueue != nil {
+		_ = embedding.Enqueue(context.WithoutCancel(c.Request.Context()), h.embeddingQueue, teamID, asset.ID)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	c.JSON(http.StatusCreated, gin.H{
@@ -548,9 +554,9 @@ func (h *MCPHandler) HandleCodeGraphImpact(c *gin.Context) {
 	sort.Strings(affectedFiles)
 
 	c.JSON(http.StatusOK, gin.H{
-		"root": gin.H{"symbol": root.Name, "file": root.FilePath, "kind": root.Kind},
-		"callers": callers,
-		"callees": callees,
+		"root":           gin.H{"symbol": root.Name, "file": root.FilePath, "kind": root.Kind},
+		"callers":        callers,
+		"callees":        callees,
 		"affected_files": affectedFiles,
 	})
 }
@@ -590,10 +596,10 @@ func (h *MCPHandler) impactTraverse(ctx context.Context, teamDB *sql.DB, rootID,
 // ---------------------------------------------------------------------------
 
 type skillSearchRequest struct {
-	Query  string `json:"query"`
-	Status string `json:"status"`
+	Query   string `json:"query"`
+	Status  string `json:"status"`
 	Version string `json:"version"`
-	TeamID string `json:"team_id"`
+	TeamID  string `json:"team_id"`
 }
 
 func (h *MCPHandler) HandleSkillSearch(c *gin.Context) {
@@ -637,14 +643,14 @@ func (h *MCPHandler) HandleSkillSearch(c *gin.Context) {
 			steps = steps[:3]
 		}
 		results = append(results, gin.H{
-			"skill_id":        skill.ID,
-			"name":            skill.Name,
-			"display_name":    skill.DisplayName,
-			"version":         skill.Version,
-			"status":          skill.Status,
+			"skill_id":         skill.ID,
+			"name":             skill.Name,
+			"display_name":     skill.DisplayName,
+			"version":          skill.Version,
+			"status":           skill.Status,
 			"trigger_boundary": skill.TriggerBoundary,
-			"steps_summary":   steps,
-			"source_ids":      skill.SourceIDs,
+			"steps_summary":    steps,
+			"source_ids":       skill.SourceIDs,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"results": results})
@@ -685,14 +691,14 @@ func (h *MCPHandler) HandleBindingGet(c *gin.Context) {
 	query += " ORDER BY binding_version DESC LIMIT 1"
 
 	var binding struct {
-		SessionID        string `json:"session_id"`
-		ConversationID   string `json:"conversation_id"`
-		TeamID           string `json:"team_id"`
-		AgentID          string `json:"agent_id"`
-		IdentityCardID   string `json:"identity_card_id"`
+		SessionID         string `json:"session_id"`
+		ConversationID    string `json:"conversation_id"`
+		TeamID            string `json:"team_id"`
+		AgentID           string `json:"agent_id"`
+		IdentityCardID    string `json:"identity_card_id"`
 		UpstreamChannelID string `json:"upstream_channel_id"`
-		BindingVersion   int    `json:"binding_version"`
-		BindingState     string `json:"binding_state"`
+		BindingVersion    int    `json:"binding_version"`
+		BindingState      string `json:"binding_state"`
 	}
 	err := h.globalDB.QueryRowContext(c.Request.Context(), query, args...).Scan(
 		&binding.SessionID, &binding.ConversationID, &binding.TeamID, &binding.AgentID, &binding.IdentityCardID,

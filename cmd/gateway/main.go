@@ -11,7 +11,9 @@ import (
 
 	"gateway/internal/config"
 	"gateway/internal/db"
+	"gateway/internal/embedding"
 	"gateway/internal/httpx"
+	"gateway/internal/paths"
 	"gateway/internal/secrets"
 	"gateway/internal/watchdog"
 	"gateway/internal/worker"
@@ -109,6 +111,7 @@ func main() {
 	// buffers, and run the recording watchdog so pending rows never pile up as
 	// a zombie retry queue.
 	go runMaintenance(database.Global, memoryRoot)
+	startEmbeddingWorker(database.Global, memoryRoot)
 
 	// Setup HTTP router
 	router := httpx.SetupRouter(database.Global, secretsManager, memoryRoot)
@@ -120,6 +123,31 @@ func main() {
 	if err := router.Run(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func startEmbeddingWorker(database *sql.DB, memoryRoot string) {
+	modelPath := os.Getenv("EMBEDDING_MODEL_PATH")
+	tokenizerPath := os.Getenv("EMBEDDING_TOKENIZER_PATH")
+	if modelPath == "" {
+		modelPath = `C:\f\memory_plus\models\all-MiniLM-L6-v2\model.onnx`
+	}
+	if tokenizerPath == "" {
+		tokenizerPath = `C:\f\memory_plus\models\all-MiniLM-L6-v2\tokenizer.json`
+	}
+	service, err := embedding.NewService(modelPath, tokenizerPath)
+	if err != nil {
+		log.Printf("Embedding worker disabled: %v", err)
+		return
+	}
+	queue := worker.NewQueue(database, 30*time.Second)
+	processor := worker.NewProcessor(queue)
+	embedding.RegisterWorker(processor, service, paths.TeamsDir(memoryRoot))
+	go func() {
+		log.Printf("Embedding worker started: model=%s dimensions=%d", modelPath, embedding.Dimensions)
+		if err := processor.Run(context.Background(), "gateway-embedding", 100*time.Millisecond); err != nil {
+			log.Printf("Embedding worker stopped: %v", err)
+		}
+	}()
 }
 
 // runMaintenance periodically drains the outbox, replays pending local durable

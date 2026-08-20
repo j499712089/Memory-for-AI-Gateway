@@ -25,6 +25,7 @@ type Asset struct {
 	Visibility     string   `json:"visibility"`
 	Version        int      `json:"version"`
 	UpdatedAt      string   `json:"updated_at"`
+	Embedding      []byte   `json:"-"`
 }
 
 // AssetFilter limits a team asset listing.
@@ -84,7 +85,36 @@ func EnsureAssetsSchema(db *sql.DB) error {
 			return fmt.Errorf("ensure assets schema: %w", err)
 		}
 	}
+	// Older team databases need this additive migration.
+	var embeddingColumn int
+	rows, err := db.Query(`PRAGMA table_info(assets)`)
+	if err != nil {
+		return fmt.Errorf("inspect assets schema: %w", err)
+	}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var nn, pk int
+		var def any
+		if rows.Scan(&cid, &name, &typ, &nn, &def, &pk) == nil && name == "embedding" {
+			embeddingColumn = 1
+		}
+	}
+	rows.Close()
+	if embeddingColumn == 0 {
+		if _, err := db.Exec(`ALTER TABLE assets ADD COLUMN embedding BLOB`); err != nil {
+			return fmt.Errorf("add asset embedding: %w", err)
+		}
+	}
 	return nil
+}
+
+func UpdateAssetEmbedding(ctx context.Context, database *sql.DB, assetID string, embedding []byte) error {
+	if database == nil || assetID == "" {
+		return fmt.Errorf("asset database and asset id are required")
+	}
+	_, err := database.ExecContext(ctx, `UPDATE assets SET embedding = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, embedding, assetID)
+	return err
 }
 
 // CreateAsset inserts a new asset and its first version atomically.

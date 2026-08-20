@@ -315,7 +315,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, next_retry_at);
 CREATE TABLE IF NOT EXISTS jobs (
     id                 TEXT PRIMARY KEY,
     queue              TEXT NOT NULL CHECK (queue IN
-                          ('l1_refine','l2_promote','l3_promote','l4_promote',
+                          ('embedding','l1_refine','l2_promote','l3_promote','l4_promote',
                            'wiki_build','codegraph_incremental','skill_review',
                            'git_commit','compensation','missing_response',
                            'buffer_replay','binding_fix')),
