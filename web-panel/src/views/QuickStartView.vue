@@ -7,13 +7,13 @@ import { useIdentityCardsStore } from '@/stores/identityCards'
 import AppIcon from '@/components/AppIcon.vue'
 import ConnectionTestPanel from '@/components/ConnectionTestPanel.vue'
 import SetupCompletePanel from '@/components/SetupCompletePanel.vue'
-import type { TeamCreateInput, ApiKeyCreateInput, IdentityCardCreateInput } from '@/api/types'
-
+import UpstreamConfigPanel from '@/components/UpstreamConfigPanel.vue'
+import QuickStartProgress from '@/components/QuickStartProgress.vue'
+import type { TeamCreateInput, ApiKeyCreateInput, IdentityCardCreateInput, UpstreamProvider } from '@/api/types'
 const router = useRouter()
 const teamsStore = useTeamsStore()
 const keysStore = useApiKeysStore()
 const cardsStore = useIdentityCardsStore()
-
 const currentStep = ref(1)
 const teamName = ref('')
 const teamSlug = ref('')
@@ -26,15 +26,15 @@ const agentId = ref('')
 const submitting = ref(false)
 const createdTeamId = ref('')
 const createdKeyValue = ref('')
+const upstreamConfigured = ref(false)
+const upstreamProvider = ref<UpstreamProvider | null>(null)
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8096'
-
 const canProceed = computed(() => {
   if (currentStep.value === 1) return teamName.value && teamSlug.value
   if (currentStep.value === 2) return keyName.value
   if (currentStep.value === 3) return cardName.value
   return true
 })
-
 async function handleStep1() {
   submitting.value = true
   try {
@@ -89,6 +89,16 @@ function goToDashboard() {
   router.push('/teams')
 }
 
+function completeUpstreamSetup(provider: UpstreamProvider) {
+  upstreamConfigured.value = true
+  upstreamProvider.value = provider
+  currentStep.value = 7
+}
+
+function skipUpstreamSetup() {
+  currentStep.value = 7
+}
+
 onMounted(async () => {
   await teamsStore.fetchTeams()
 })
@@ -101,22 +111,7 @@ onMounted(async () => {
       <p class="text-sm text-gray-500">5 分钟完成 Memory Gateway 基础配置</p>
     </div>
 
-    <div class="flex items-center justify-between rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-      <div
-        v-for="step in 5"
-        :key="step"
-        class="flex items-center"
-        :class="{ 'opacity-40': step > currentStep }"
-      >
-        <div
-          class="flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium"
-          :class="step <= currentStep ? 'bg-blue-600 text-white' : 'border border-gray-300 text-gray-400'"
-        >
-          {{ step }}
-        </div>
-        <div v-if="step < 5" class="mx-2 h-px w-12 bg-gray-300"></div>
-      </div>
-    </div>
+    <QuickStartProgress :current-step="currentStep" />
 
     <div v-if="currentStep === 1" class="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
       <div>
@@ -278,11 +273,28 @@ onMounted(async () => {
     />
 
     <SetupCompletePanel
-      v-if="currentStep === 5"
+      v-if="currentStep === 5 || currentStep === 7"
+      :api-base="apiBase"
       :card-name="cardName"
+      :gateway-key="createdKeyValue"
       :key-name="keyName"
+      :show-continue="currentStep === 5"
       :team-name="teamName"
+      :upstream-configured="upstreamConfigured"
+      :upstream-provider="upstreamProvider"
+      @continue="currentStep = 6"
       @finish="goToDashboard"
     />
+
+    <UpstreamConfigPanel
+      v-if="currentStep === 6"
+      :api-base="apiBase"
+      :api-key="createdKeyValue"
+      :team-id="createdTeamId"
+      @back="currentStep = 5"
+      @complete="completeUpstreamSetup"
+      @skip="skipUpstreamSetup"
+    />
+
   </div>
 </template>

@@ -63,4 +63,22 @@ describe('SetupCompletePanel', () => {
     expect(wrapper.find('[data-icon="book-open"]').exists()).toBe(true)
     expect(wrapper.text()).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
   })
+
+  it('完成页展示上游配置状态与可执行 curl 示例', () => {
+    const wrapper = mount(SetupCompletePanel, {
+      props: {
+        teamName: '团队',
+        keyName: '密钥',
+        cardName: '身份卡',
+        upstreamConfigured: true,
+        upstreamProvider: 'anthropic',
+        gatewayKey: 'gw-test-key',
+        apiBase: 'http://127.0.0.1:8096',
+      },
+    })
+
+    expect(wrapper.text()).toContain('Anthropic (Claude)')
+    expect(wrapper.get('[data-curl-example]').text()).toContain('Bearer gw-test-key')
+    expect(wrapper.get('[data-curl-example]').text()).toContain('/v1/messages')
+  })
 })
