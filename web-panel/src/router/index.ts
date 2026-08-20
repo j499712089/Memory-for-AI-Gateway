@@ -38,6 +38,12 @@ const router = createRouter({
       meta: { title: '上游通道' },
     },
     {
+      path: '/upstream-keys',
+      name: 'upstream-keys',
+      component: () => import('@/views/UpstreamKeysView.vue'),
+      meta: { title: '上游通道配置' },
+    },
+    {
       path: '/health',
       name: 'health',
       component: () => import('@/views/HealthDashboardView.vue'),

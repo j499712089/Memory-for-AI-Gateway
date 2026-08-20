@@ -25,6 +25,11 @@ import type {
   TerminalStatus,
   UpstreamChannel,
   UpstreamCreateInput,
+  UpstreamKeySaveResponse,
+  UpstreamKeySummary,
+  UpstreamKeyTestResponse,
+  UpstreamKeysResponse,
+  UpstreamProvider,
 } from './types'
 
 const GATEWAY_KEY_STORAGE = 'mgw.gatewayKey'
@@ -171,6 +176,23 @@ export const upstreamsApi = {
   update: (id: string, input: Partial<UpstreamCreateInput>) =>
     request<UpstreamChannel>(`/api/upstream-channels/${id}`, { method: 'PUT', body: input }),
   disable: (id: string) => request<UpstreamChannel>(`/api/upstream-channels/${id}`, { method: 'DELETE' }),
+}
+
+// ---------- 上游 API Key ----------
+
+export const upstreamKeysApi = {
+  async list(teamId: string): Promise<UpstreamKeysResponse> {
+    const result = await request<UpstreamKeysResponse | UpstreamKeySummary[]>('/api/upstreams/keys', {
+      params: { team_id: teamId },
+    })
+    return Array.isArray(result) ? { keys: result } : result
+  },
+  save: (input: { team_id: string; provider: UpstreamProvider; api_key: string }) =>
+    request<UpstreamKeySaveResponse>('/api/upstreams/keys', { method: 'POST', body: input }),
+  test: (input: { team_id: string; provider: UpstreamProvider }) =>
+    request<UpstreamKeyTestResponse>('/api/upstreams/keys/test', { method: 'POST', body: input }),
+  remove: (input: { team_id: string; provider: UpstreamProvider }) =>
+    request<void>('/api/upstreams/keys', { method: 'DELETE', body: input }),
 }
 
 // ---------- 会话与绑定 ----------

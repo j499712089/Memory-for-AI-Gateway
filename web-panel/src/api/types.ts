@@ -194,6 +194,36 @@ export interface ImportModelsResult {
   channels: UpstreamChannel[]
 }
 
+export type UpstreamProvider = 'anthropic' | 'openai' | 'codex'
+
+export interface UpstreamKeySummary {
+  provider: UpstreamProvider
+  key_prefix: string
+  configured_at: string
+  last_tested_at: string | null
+  test_status: 'success' | 'failed' | 'failure' | 'unknown'
+}
+
+export interface UpstreamKeysResponse {
+  keys: UpstreamKeySummary[]
+}
+
+export interface UpstreamKeySaveResponse {
+  success?: boolean
+  status?: string
+  provider: UpstreamProvider
+  key_prefix: string
+}
+
+export interface UpstreamKeyTestResponse {
+  success: boolean
+  provider: UpstreamProvider
+  tested_at?: string
+  available_models?: string[]
+  models?: string[]
+  error?: string | null
+}
+
 // ---------- 会话与绑定 (§3.5) ----------
 
 export interface Session {

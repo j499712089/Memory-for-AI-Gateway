@@ -8,6 +8,7 @@ defineProps<{
     | 'loader'
     | 'plug'
     | 'triangle-alert'
+    | 'x'
 }>()
 </script>
 
@@ -49,6 +50,10 @@ defineProps<{
       <path d="M9 8V2" />
       <path d="M15 8V2" />
       <path d="M18 8v5a6 6 0 0 1-12 0V8Z" />
+    </g>
+    <g v-else-if="name === 'x'">
+      <path d="m6 6 12 12" />
+      <path d="m18 6-12 12" />
     </g>
     <g v-else>
       <path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" />
