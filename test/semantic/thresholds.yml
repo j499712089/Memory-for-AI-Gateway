@@ -1,0 +1,69 @@
+# Semantic Similarity Threshold Calibration
+#
+# This file defines language-specific thresholds for semantic validity assertions.
+# These thresholds are used by ALL-155 acceptance tests to verify that the
+# embedding implementation produces semantically meaningful vectors.
+#
+# Calibration methodology:
+# 1. Prepare probe text pairs: synonymous pairs (same meaning, different wording)
+#    and unrelated pairs (completely different topics)
+# 2. Encode each text using the production embedding service
+# 3. Compute cosine similarity for all pairs
+# 4. Set thresholds based on observed distribution with safety margins
+#
+# Last calibrated: 2026-08-22
+# Model: F:\AI\models\all-MiniLM-L6-v2\model_quantized.onnx (sha256 hash placeholder)
+# Dimensions: 384
+
+version: 1
+
+thresholds:
+  # English thresholds - calibrated and verified
+  en:
+    synonym_min: 0.5      # Minimum cosine similarity for synonymous text pairs
+    unrelated_max: 0.3    # Maximum cosine similarity for unrelated text pairs
+    separation_min: 0.15  # Minimum separation: min(synonym) - max(unrelated)
+
+    # Observed distribution (for reference):
+    # - Synonymous pairs: 0.81-0.93
+    # - Unrelated pairs: 0.00-0.05
+    # - Actual separation: ~0.76
+
+  # Chinese thresholds - PENDING ALL-159 model decision
+  zh:
+    synonym_min: 0.55     # PLACEHOLDER - recalibrate after model selection
+    unrelated_max: 0.45   # PLACEHOLDER - recalibrate after model selection
+    separation_min: 0.15  # Relative separation (model-independent)
+
+    # Known issue with all-MiniLM-L6-v2:
+    # - 85% of CJK characters fall into [UNK] tokens
+    # - Vector space collapse causes unrelated pairs to score 0.41-0.47
+    # - Current thresholds are INVALID for Chinese text
+    #
+    # Pending decision (ALL-159):
+    # - Option A: paraphrase-multilingual-MiniLM-L12-v2 (250k vocab, 384-dim)
+    # - Option B: bge-small-zh-v1.5 (optimal Chinese, 512-dim)
+    # - Option C: Keep all-MiniLM-L6-v2 and drop Chinese retrieval requirement
+
+# Calibration metadata
+calibration:
+  model_path: "F:\\AI\\models\\all-MiniLM-L6-v2\\model_quantized.onnx"
+  model_size_bytes: 22972370
+  model_sha256: "PENDING"  # Run: certutil -hashfile <path> SHA256
+  tokenizer_path: "F:\\AI\\models\\all-MiniLM-L6-v2\\tokenizer.json"
+  calibration_date: "2026-08-22"
+  calibrator: "ALL-160"
+
+  # When to recalibrate:
+  # - Model file changes (different sha256)
+  # - Tokenizer changes
+  # - Embedding normalization logic changes
+  # - Observed semantic search quality degrades
+
+# Usage notes:
+#
+# 1. ALL-155 acceptance tests MUST read thresholds from this file
+# 2. Tests MUST verify both absolute thresholds AND relative separation
+# 3. Hash-based placeholder implementations will fail synonym_min check
+# 4. DO NOT hardcode thresholds in test code - always reference this file
+# 5. After ALL-159 model decision, re-run calibration script and update zh section
