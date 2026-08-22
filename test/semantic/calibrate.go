@@ -102,7 +102,7 @@ func calibrateLanguage(service *embedding.Service, lang string, synonymPairs, un
 
 // PrintCalibrationReport outputs calibration results to stdout in human-readable format
 func PrintCalibrationReport(results map[string]CalibrationResult) {
-	fmt.Println("=== Semantic Similarity Threshold Calibration Report ===\n")
+	fmt.Println("=== Semantic Similarity Threshold Calibration Report ===")
 
 	for _, lang := range []string{"en", "zh"} {
 		result, ok := results[lang]
@@ -114,14 +114,14 @@ func PrintCalibrationReport(results map[string]CalibrationResult) {
 		fmt.Println()
 
 		fmt.Printf("Synonymous pairs (%d samples):\n", len(result.SynonymScores))
-		for i, score := range result.SynonymScores {
+		for _, score := range result.SynonymScores {
 			fmt.Printf("  %.4f\n", score)
 		}
 		fmt.Printf("  → Min: %.4f\n", result.MinSynonym)
 		fmt.Println()
 
 		fmt.Printf("Unrelated pairs (%d samples):\n", len(result.UnrelatedScores))
-		for i, score := range result.UnrelatedScores {
+		for _, score := range result.UnrelatedScores {
 			fmt.Printf("  %.4f\n", score)
 		}
 		fmt.Printf("  → Max: %.4f\n", result.MaxUnrelated)
