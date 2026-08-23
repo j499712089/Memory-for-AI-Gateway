@@ -111,10 +111,10 @@ func main() {
 	// buffers, and run the recording watchdog so pending rows never pile up as
 	// a zombie retry queue.
 	go runMaintenance(database.Global, memoryRoot)
-	startEmbeddingWorker(database.Global, memoryRoot)
+	embeddingService := startEmbeddingWorker(database.Global, memoryRoot)
 
 	// Setup HTTP router
-	router := httpx.SetupRouter(database.Global, secretsManager, memoryRoot)
+	router := httpx.SetupRouter(database.Global, secretsManager, memoryRoot, embeddingService)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -125,19 +125,19 @@ func main() {
 	}
 }
 
-func startEmbeddingWorker(database *sql.DB, memoryRoot string) {
+func startEmbeddingWorker(database *sql.DB, memoryRoot string) *embedding.Service {
 	modelPath := os.Getenv("EMBEDDING_MODEL_PATH")
 	tokenizerPath := os.Getenv("EMBEDDING_TOKENIZER_PATH")
 	if modelPath == "" {
-		modelPath = `C:\f\memory_plus\models\all-MiniLM-L6-v2\model.onnx`
+		modelPath = `F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\model_quantized.onnx`
 	}
 	if tokenizerPath == "" {
-		tokenizerPath = `C:\f\memory_plus\models\all-MiniLM-L6-v2\tokenizer.json`
+		tokenizerPath = `F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\tokenizer.json`
 	}
 	service, err := embedding.NewService(modelPath, tokenizerPath)
 	if err != nil {
-		log.Printf("Embedding worker disabled: %v", err)
-		return
+		log.Printf("Embedding worker disabled and semantic retrieval unavailable: %v", err)
+		return nil
 	}
 	queue := worker.NewQueue(database, 30*time.Second)
 	processor := worker.NewProcessor(queue)
@@ -148,6 +148,7 @@ func startEmbeddingWorker(database *sql.DB, memoryRoot string) {
 			log.Printf("Embedding worker stopped: %v", err)
 		}
 	}()
+	return service
 }
 
 // runMaintenance periodically drains the outbox, replays pending local durable

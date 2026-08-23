@@ -34,11 +34,11 @@ func RegisterWorker(processor *worker.Processor, service *Service, teamsDir stri
 		if err != nil {
 			return err
 		}
-		vector, err := service.Encode(asset.Summary)
+		vector, err := service.EncodeDocument(asset.Name + "\n" + asset.Summary)
 		if err != nil {
 			return err
 		}
-		return db.UpdateAssetEmbedding(ctx, teamDB, payload.AssetID, Float32ToBytes(vector))
+		return db.UpdateAssetEmbedding(ctx, teamDB, payload.AssetID, Float32ToBytes(vector), service.ModelVersion())
 	})
 }
 

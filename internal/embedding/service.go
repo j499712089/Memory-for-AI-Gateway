@@ -1,25 +1,36 @@
 package embedding
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sync"
-	"time"
+
+	ort "github.com/yalue/onnxruntime_go"
 )
 
-const Dimensions = 384
+const (
+	Dimensions        = 384
+	ModelVersion      = "paraphrase-multilingual-MiniLM-L12-v2"
+	defaultRuntimeDLL = "onnxruntime.dll"
+)
 
-// Service owns the embedding model assets. The deterministic encoder keeps the
-// gateway usable on hosts without the ONNX shared library; Runtime can be
-// replaced by an ONNX-backed implementation without changing callers.
+var runtimeMu sync.Mutex
+
+// Service owns one ONNX session and its matching WordPiece tokenizer. The
+// session is shared by workers and retrieval queries so both paths use the
+// exact same encoder and vector space.
 type Service struct {
 	modelPath     string
 	tokenizerPath string
-	mu            sync.RWMutex
-	modelReady    bool
+	tokenizer     *Tokenizer
+	session       *ort.DynamicAdvancedSession
+	inputNames    []string
+	outputName    string
+	mu            sync.Mutex
 }
 
 func NewService(modelPath, tokenizerPath string) (*Service, error) {
@@ -29,41 +40,209 @@ func NewService(modelPath, tokenizerPath string) (*Service, error) {
 	if _, err := os.Stat(modelPath); err != nil {
 		return nil, fmt.Errorf("embedding model: %w", err)
 	}
-	if _, err := os.Stat(tokenizerPath); err != nil {
-		return nil, fmt.Errorf("embedding tokenizer: %w", err)
+	tokenizer, err := LoadTokenizer(tokenizerPath)
+	if err != nil {
+		return nil, err
 	}
-	return &Service{modelPath: modelPath, tokenizerPath: tokenizerPath, modelReady: true}, nil
+	if err := initializeRuntime(modelPath); err != nil {
+		return nil, fmt.Errorf("initialize onnxruntime: %w", err)
+	}
+	inputNames, outputName, err := modelIO(modelPath)
+	if err != nil {
+		return nil, err
+	}
+	session, err := ort.NewDynamicAdvancedSession(modelPath, inputNames, []string{outputName}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create ONNX session: %w", err)
+	}
+	return &Service{
+		modelPath: modelPath, tokenizerPath: tokenizerPath, tokenizer: tokenizer,
+		session: session, inputNames: inputNames, outputName: outputName,
+	}, nil
 }
 
+func initializeRuntime(modelPath string) error {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	if ort.IsInitialized() {
+		return nil
+	}
+	sharedPath := os.Getenv("ONNXRUNTIME_SHARED_LIBRARY_PATH")
+	if sharedPath == "" {
+		sharedPath = os.Getenv("ONNXRUNTIME_DLL_PATH")
+	}
+	if sharedPath == "" {
+		candidate := filepath.Join(filepath.Dir(modelPath), defaultRuntimeDLL)
+		if _, err := os.Stat(candidate); err == nil {
+			sharedPath = candidate
+		}
+	}
+	if sharedPath != "" {
+		ort.SetSharedLibraryPath(sharedPath)
+	}
+	if err := ort.InitializeEnvironment(ort.WithLogLevelWarning()); err != nil {
+		return fmt.Errorf("load %s (set ONNXRUNTIME_SHARED_LIBRARY_PATH to its absolute path): %w", defaultRuntimeDLL, err)
+	}
+	return nil
+}
+
+func modelIO(path string) ([]string, string, error) {
+	inputs, outputs, err := ort.GetInputOutputInfo(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("inspect ONNX model: %w", err)
+	}
+	if len(outputs) == 0 {
+		return nil, "", fmt.Errorf("ONNX model has no outputs")
+	}
+	if len(outputs[0].Dimensions) > 0 {
+		last := outputs[0].Dimensions[len(outputs[0].Dimensions)-1]
+		if last > 0 && last != Dimensions {
+			return nil, "", fmt.Errorf("ONNX output dimension is %d, want %d", last, Dimensions)
+		}
+	}
+	inputNames := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		if input.Name == "input_ids" || input.Name == "attention_mask" || input.Name == "token_type_ids" {
+			inputNames = append(inputNames, input.Name)
+		}
+	}
+	if len(inputNames) == 0 {
+		return nil, "", fmt.Errorf("ONNX model has no supported text inputs")
+	}
+	return inputNames, outputs[0].Name, nil
+}
+
+// Encode runs tokenizer -> ONNX -> attention-mask weighted mean pooling -> L2
+// normalization, matching sentence-transformers' mean-pooling contract.
 func (s *Service) Encode(text string) ([]float32, error) {
-	start := time.Now()
-	if s == nil || !s.modelReady {
+	if s == nil || s.session == nil || s.tokenizer == nil {
 		return nil, fmt.Errorf("embedding service is not ready")
 	}
-	if text == "" {
-		return nil, fmt.Errorf("text is required")
+	ids, mask, types, err := s.tokenizer.Encode(text)
+	if err != nil {
+		return nil, err
 	}
-	// Hash expansion is deterministic and bounded; production ONNX runtimes can
-	// implement the same contract while preserving the 384-dimensional shape.
-	result := make([]float32, Dimensions)
-	for i := 0; i < Dimensions; i += 8 {
-		digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", i/8, text)))
-		for j := 0; j < 8 && i+j < Dimensions; j++ {
-			result[i+j] = float32(int8(digest[j])) / 128
+	inputValues := make([]ort.Value, 0, len(s.inputNames))
+	owned := make([]ort.Value, 0, len(s.inputNames))
+	for _, name := range s.inputNames {
+		var values []int64
+		switch name {
+		case "input_ids":
+			values = ids
+		case "attention_mask":
+			values = mask
+		case "token_type_ids":
+			values = types
 		}
+		tensor, tensorErr := ort.NewTensor[int64](ort.Shape{1, int64(len(values))}, values)
+		if tensorErr != nil {
+			for _, value := range owned {
+				_ = value.Destroy()
+			}
+			return nil, fmt.Errorf("create %s tensor: %w", name, tensorErr)
+		}
+		owned = append(owned, tensor)
+		inputValues = append(inputValues, tensor)
+	}
+	defer func() {
+		for _, value := range owned {
+			_ = value.Destroy()
+		}
+	}()
+
+	s.mu.Lock()
+	outputs := []ort.Value{nil}
+	runErr := s.session.Run(inputValues, outputs)
+	s.mu.Unlock()
+	if runErr != nil {
+		return nil, fmt.Errorf("run ONNX model: %w", runErr)
+	}
+	if outputs[0] == nil {
+		return nil, fmt.Errorf("ONNX model returned no output")
+	}
+	defer outputs[0].Destroy()
+	output, ok := outputs[0].(*ort.Tensor[float32])
+	if !ok {
+		return nil, fmt.Errorf("ONNX output %q is not float32 tensor", s.outputName)
+	}
+	data := output.GetData()
+	shape := output.GetShape()
+	if len(shape) == 2 && len(data) >= Dimensions {
+		result := append([]float32(nil), data[:Dimensions]...)
+		return normalize(result)
+	}
+	sequenceLength := len(mask)
+	if len(shape) == 3 && shape[1] > 0 {
+		sequenceLength = int(shape[1])
+	}
+	if len(data) < sequenceLength*Dimensions {
+		return nil, fmt.Errorf("ONNX output has %d values, want at least %d", len(data), sequenceLength*Dimensions)
+	}
+	result := make([]float32, Dimensions)
+	var count float32
+	for token := 0; token < sequenceLength; token++ {
+		if mask[token] == 0 {
+			continue
+		}
+		count++
+		row := data[token*Dimensions : (token+1)*Dimensions]
+		for i, value := range row {
+			result[i] += value
+		}
+	}
+	if count == 0 {
+		return nil, fmt.Errorf("tokenizer produced an empty attention mask")
 	}
 	var norm float64
-	for _, v := range result {
-		norm += float64(v * v)
+	for i := range result {
+		result[i] /= count
+		norm += float64(result[i] * result[i])
+	}
+	if norm == 0 {
+		return nil, fmt.Errorf("ONNX model returned a zero vector")
 	}
 	norm = math.Sqrt(norm)
-	if norm > 0 {
-		for i := range result {
-			result[i] = float32(float64(result[i]) / norm)
-		}
+	for i := range result {
+		result[i] = float32(float64(result[i]) / norm)
 	}
-	_ = start
+	return normalize(result)
+}
+
+func normalize(result []float32) ([]float32, error) {
+	var norm float64
+	for _, value := range result {
+		norm += float64(value * value)
+	}
+	if norm == 0 {
+		return nil, fmt.Errorf("ONNX model returned a zero vector")
+	}
+	norm = math.Sqrt(norm)
+	for i := range result {
+		result[i] = float32(float64(result[i]) / norm)
+	}
 	return result, nil
+}
+
+// Close releases this service's session. The process-wide ONNX environment is
+// intentionally retained because other services may share it.
+func (s *Service) Close() error {
+	if s == nil || s.session == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.session.Destroy()
+	s.session = nil
+	return err
+}
+
+func (s *Service) ModelVersion() string { return ModelVersion }
+
+func (s *Service) String() string {
+	if s == nil {
+		return "embedding service unavailable"
+	}
+	return "embedding model " + filepath.Base(s.modelPath)
 }
 
 func Float32ToBytes(values []float32) []byte {
@@ -83,4 +262,8 @@ func BytesToFloat32(data []byte) ([]float32, error) {
 		values[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
 	}
 	return values, nil
+}
+
+func logEmbeddingFallback(reason string) {
+	log.Printf("embedding vector retrieval degraded to FTS: %s", reason)
 }

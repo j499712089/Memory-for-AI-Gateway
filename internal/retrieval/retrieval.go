@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gateway/internal/acl"
+	"gateway/internal/embedding"
 )
 
 type Request struct {
@@ -21,9 +22,18 @@ type Request struct {
 	Timeout        time.Duration
 }
 
-type Pipeline struct{ database *sql.DB }
+type Pipeline struct {
+	database  *sql.DB
+	embedding *embedding.Service
+}
 
-func NewPipeline(database *sql.DB) *Pipeline { return &Pipeline{database: database} }
+func NewPipeline(database *sql.DB, services ...*embedding.Service) *Pipeline {
+	var service *embedding.Service
+	if len(services) > 0 {
+		service = services[0]
+	}
+	return &Pipeline{database: database, embedding: service}
+}
 
 func (p *Pipeline) Search(ctx context.Context, request Request) (Result, error) {
 	if p == nil || p.database == nil {
@@ -44,7 +54,7 @@ func (p *Pipeline) Search(ctx context.Context, request Request) (Result, error) 
 	if searchLimit > 200 {
 		searchLimit = 200
 	}
-	candidates, err := SearchFTS(searchCtx, p.database, request.Query, searchLimit)
+	candidates, err := SearchHybrid(searchCtx, p.database, request.Query, searchLimit, p.embedding)
 	if err != nil {
 		return Result{}, err
 	}
@@ -77,4 +87,8 @@ func (p *Pipeline) Search(ctx context.Context, request Request) (Result, error) 
 
 func Search(ctx context.Context, database *sql.DB, request Request) (Result, error) {
 	return NewPipeline(database).Search(ctx, request)
+}
+
+func SearchWithEmbedding(ctx context.Context, database *sql.DB, service *embedding.Service, request Request) (Result, error) {
+	return NewPipeline(database, service).Search(ctx, request)
 }

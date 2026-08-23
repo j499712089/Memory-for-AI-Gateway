@@ -30,15 +30,20 @@ import (
 // through the retrieval/query layer, the single write tool (memory/append)
 // goes through the same SQLite transaction layer used by the Worker pipeline.
 type MCPHandler struct {
-	globalDB       *sql.DB
-	teamsDir       string
-	memoryRoot     string
-	embeddingQueue *worker.Queue
+	globalDB         *sql.DB
+	teamsDir         string
+	memoryRoot       string
+	embeddingQueue   *worker.Queue
+	embeddingService *embedding.Service
 }
 
-func NewMCPHandler(globalDB *sql.DB, memoryRoot string) *MCPHandler {
+func NewMCPHandler(globalDB *sql.DB, memoryRoot string, services ...*embedding.Service) *MCPHandler {
 	teamsDir := paths.TeamsDir(memoryRoot)
-	return &MCPHandler{globalDB: globalDB, teamsDir: teamsDir, memoryRoot: memoryRoot, embeddingQueue: worker.NewQueue(globalDB, 30*time.Second)}
+	var service *embedding.Service
+	if len(services) > 0 {
+		service = services[0]
+	}
+	return &MCPHandler{globalDB: globalDB, teamsDir: teamsDir, memoryRoot: memoryRoot, embeddingQueue: worker.NewQueue(globalDB, 30*time.Second), embeddingService: service}
 }
 
 var safeTeamID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9\-_]{0,63}$`)
@@ -191,7 +196,7 @@ func (h *MCPHandler) HandleMemorySearch(c *gin.Context) {
 	}
 	defer teamDB.Close()
 
-	result, err := retrieval.Search(c.Request.Context(), teamDB, retrieval.Request{
+	result, err := retrieval.SearchWithEmbedding(c.Request.Context(), teamDB, h.embeddingService, retrieval.Request{
 		TeamID:         teamID,
 		IdentityCardID: req.IdentityCardID,
 		Query:          req.Query,

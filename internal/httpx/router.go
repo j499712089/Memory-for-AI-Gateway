@@ -4,13 +4,14 @@ import (
 	"database/sql"
 
 	"gateway/internal/auth"
+	"gateway/internal/embedding"
 	"gateway/internal/secrets"
 
 	"github.com/gin-gonic/gin"
 )
 
 // SetupRouter configures the HTTP router with all endpoints
-func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string) *gin.Engine {
+func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string, services ...*embedding.Service) *gin.Engine {
 	// Create router
 	r := gin.Default()
 
@@ -18,7 +19,7 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string)
 	healthHandler := NewHealthHandler(db)
 	adminHandler := NewAdminHandler(db, secretsManager)
 	gatewayHandler := NewGatewayHandler(db, secretsManager, memoryRoot)
-	mcpHandler := NewMCPHandler(db, memoryRoot)
+	mcpHandler := NewMCPHandler(db, memoryRoot, services...)
 	systemHandler := NewSystemHandler(db)
 	identityHandler := NewIdentityHandler(db)
 

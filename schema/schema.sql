@@ -491,6 +491,7 @@ CREATE TABLE IF NOT EXISTS assets (
     visibility          TEXT NOT NULL DEFAULT 'private'
                           CHECK (visibility IN ('private','team','restricted','agent')),
     version             INTEGER NOT NULL DEFAULT 1,   -- 乐观锁
+    embedding_model_version TEXT,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (asset_type, slug, version),

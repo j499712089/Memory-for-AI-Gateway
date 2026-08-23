@@ -11,21 +11,22 @@ import (
 
 // Asset is the team-local representation used by retrieval and API consumers.
 type Asset struct {
-	ID             string   `json:"asset_id"`
-	TeamID         string   `json:"team_id"`
-	IdentityCardID string   `json:"identity_card_id,omitempty"`
-	AssetType      string   `json:"asset_type"`
-	Name           string   `json:"name"`
-	Slug           string   `json:"slug"`
-	Summary        string   `json:"summary"`
-	BodyPath       string   `json:"body_path,omitempty"`
-	SourceEventIDs []string `json:"source_event_ids"`
-	Confidence     float64  `json:"confidence"`
-	Status         string   `json:"status"`
-	Visibility     string   `json:"visibility"`
-	Version        int      `json:"version"`
-	UpdatedAt      string   `json:"updated_at"`
-	Embedding      []byte   `json:"-"`
+	ID                    string   `json:"asset_id"`
+	TeamID                string   `json:"team_id"`
+	IdentityCardID        string   `json:"identity_card_id,omitempty"`
+	AssetType             string   `json:"asset_type"`
+	Name                  string   `json:"name"`
+	Slug                  string   `json:"slug"`
+	Summary               string   `json:"summary"`
+	BodyPath              string   `json:"body_path,omitempty"`
+	SourceEventIDs        []string `json:"source_event_ids"`
+	Confidence            float64  `json:"confidence"`
+	Status                string   `json:"status"`
+	Visibility            string   `json:"visibility"`
+	Version               int      `json:"version"`
+	UpdatedAt             string   `json:"updated_at"`
+	Embedding             []byte   `json:"-"`
+	EmbeddingModelVersion string   `json:"-"`
 }
 
 // AssetFilter limits a team asset listing.
@@ -51,6 +52,7 @@ func EnsureAssetsSchema(db *sql.DB) error {
 			source_event_ids TEXT NOT NULL DEFAULT '[]', confidence REAL NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'draft', visibility TEXT NOT NULL DEFAULT 'private',
 			version INTEGER NOT NULL DEFAULT 1,
+			embedding_model_version TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			UNIQUE(asset_type, slug, version))`,
@@ -86,7 +88,7 @@ func EnsureAssetsSchema(db *sql.DB) error {
 		}
 	}
 	// Older team databases need this additive migration.
-	var embeddingColumn int
+	var embeddingColumn, embeddingVersionColumn int
 	rows, err := db.Query(`PRAGMA table_info(assets)`)
 	if err != nil {
 		return fmt.Errorf("inspect assets schema: %w", err)
@@ -96,8 +98,13 @@ func EnsureAssetsSchema(db *sql.DB) error {
 		var name, typ string
 		var nn, pk int
 		var def any
-		if rows.Scan(&cid, &name, &typ, &nn, &def, &pk) == nil && name == "embedding" {
-			embeddingColumn = 1
+		if rows.Scan(&cid, &name, &typ, &nn, &def, &pk) == nil {
+			switch name {
+			case "embedding":
+				embeddingColumn = 1
+			case "embedding_model_version":
+				embeddingVersionColumn = 1
+			}
 		}
 	}
 	rows.Close()
@@ -106,14 +113,23 @@ func EnsureAssetsSchema(db *sql.DB) error {
 			return fmt.Errorf("add asset embedding: %w", err)
 		}
 	}
+	if embeddingVersionColumn == 0 {
+		if _, err := db.Exec(`ALTER TABLE assets ADD COLUMN embedding_model_version TEXT`); err != nil {
+			return fmt.Errorf("add embedding model version: %w", err)
+		}
+	}
 	return nil
 }
 
-func UpdateAssetEmbedding(ctx context.Context, database *sql.DB, assetID string, embedding []byte) error {
+func UpdateAssetEmbedding(ctx context.Context, database *sql.DB, assetID string, embedding []byte, modelVersion ...string) error {
 	if database == nil || assetID == "" {
 		return fmt.Errorf("asset database and asset id are required")
 	}
-	_, err := database.ExecContext(ctx, `UPDATE assets SET embedding = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, embedding, assetID)
+	version := ""
+	if len(modelVersion) > 0 {
+		version = modelVersion[0]
+	}
+	_, err := database.ExecContext(ctx, `UPDATE assets SET embedding = ?, embedding_model_version = NULLIF(?, ''), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, embedding, version, assetID)
 	return err
 }
 

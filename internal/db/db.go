@@ -99,6 +99,10 @@ func OpenTeamDB(teamsDir, teamID string) (*sql.DB, error) {
 			return nil, fmt.Errorf("failed to set pragma: %w", err)
 		}
 	}
+	if err := EnsureAssetsSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ensure team assets schema: %w", err)
+	}
 
 	return db, nil
 }
