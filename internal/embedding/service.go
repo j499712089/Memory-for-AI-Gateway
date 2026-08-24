@@ -150,14 +150,22 @@ func (s *Service) Encode(text string) ([]float32, error) {
 	if len(data) < sequenceLength*Dimensions {
 		return nil, fmt.Errorf("ONNX output has %d values, want at least %d", len(data), sequenceLength*Dimensions)
 	}
-	result := make([]float32, Dimensions)
+	return meanPoolAndNormalize(data, mask, sequenceLength, Dimensions)
+}
+
+// meanPoolAndNormalize computes the attention-mask weighted mean over the token
+// dimension of the ONNX output, then L2-normalizes the pooled vector, matching
+// sentence-transformers' mean-pooling contract. Padded tokens (mask == 0) must
+// not contribute to the mean.
+func meanPoolAndNormalize(data []float32, mask []int64, sequenceLength, dimensions int) ([]float32, error) {
+	result := make([]float32, dimensions)
 	var count float32
 	for token := 0; token < sequenceLength; token++ {
 		if mask[token] == 0 {
 			continue
 		}
 		count++
-		row := data[token*Dimensions : (token+1)*Dimensions]
+		row := data[token*dimensions : (token+1)*dimensions]
 		for i, value := range row {
 			result[i] += value
 		}
@@ -165,17 +173,8 @@ func (s *Service) Encode(text string) ([]float32, error) {
 	if count == 0 {
 		return nil, fmt.Errorf("tokenizer produced an empty attention mask")
 	}
-	var norm float64
 	for i := range result {
 		result[i] /= count
-		norm += float64(result[i] * result[i])
-	}
-	if norm == 0 {
-		return nil, fmt.Errorf("ONNX model returned a zero vector")
-	}
-	norm = math.Sqrt(norm)
-	for i := range result {
-		result[i] = float32(float64(result[i]) / norm)
 	}
 	return normalize(result)
 }

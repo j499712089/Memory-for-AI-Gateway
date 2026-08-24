@@ -3,6 +3,7 @@ package embedding
 import (
 	"encoding/json"
 	"fmt"
+	"unicode"
 )
 
 type unigramPiece struct {
@@ -135,7 +136,7 @@ func metaspace(text, replacement string, addPrefixSpace bool) string {
 	result := make([]rune, 0, len([]rune(text))+1)
 	needsPrefix := addPrefixSpace
 	for _, r := range text {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+		if unicode.IsSpace(r) {
 			needsPrefix = true
 			continue
 		}

@@ -29,6 +29,18 @@ type tokenizerNormalizer struct {
 	Lowercase           bool   `json:"lowercase"`
 }
 
+// addedToken mirrors the added_tokens entry of a tokenizer.json. The special,
+// normalized, lstrip and rstrip flags drive how special tokens are carved out
+// of raw text before normalization (see carveAddedTokens).
+type addedToken struct {
+	ID         int    `json:"id"`
+	Content    string `json:"content"`
+	Special    bool   `json:"special"`
+	Normalized bool   `json:"normalized"`
+	LStrip     bool   `json:"lstrip"`
+	RStrip     bool   `json:"rstrip"`
+}
+
 type tokenizerFile struct {
 	Truncation *struct {
 		MaxLength int `json:"max_length"`
@@ -47,11 +59,8 @@ type tokenizerFile struct {
 			AddPrefix   bool   `json:"add_prefix_space"`
 		} `json:"pretokenizers"`
 	} `json:"pre_tokenizer"`
-	AddedTokens []struct {
-		ID      int    `json:"id"`
-		Content string `json:"content"`
-	} `json:"added_tokens"`
-	Model tokenizerModel `json:"model"`
+	AddedTokens []addedToken   `json:"added_tokens"`
+	Model       tokenizerModel `json:"model"`
 }
 
 type tokenizerKind uint8
@@ -80,6 +89,7 @@ type Tokenizer struct {
 	metaspaceReplacement string
 	metaspacePrefixSpace bool
 	precompiled          *spm.Precompiled
+	addedTokens          []addedToken
 }
 
 func LoadTokenizer(path string) (*Tokenizer, error) {
@@ -94,6 +104,15 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 	if len(file.Model.Vocab) == 0 {
 		return nil, fmt.Errorf("tokenizer model has no vocabulary")
 	}
+	// The carve pipeline matches added tokens against the raw string and the
+	// normalized residuals; tokens with normalized == true would need a second
+	// split pass the approved artifacts never exercise. Reject them outright so
+	// a document cannot silently change tokenization semantics.
+	for _, token := range file.AddedTokens {
+		if token.Normalized {
+			return nil, fmt.Errorf("added token %q has normalized=true, which is unsupported", token.Content)
+		}
+	}
 	sequenceLength := defaultSequenceLength
 	if file.Truncation != nil && file.Truncation.MaxLength > 0 {
 		if file.Truncation.MaxLength != defaultSequenceLength {
@@ -105,7 +124,10 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if file.Model.Type == "Unigram" && normalizerType != "" && normalizerType != "Precompiled" {
+	// The approved Unigram artifact must carry its SentencePiece Precompiled
+	// charsmap; a document with the normalizer removed (or swapped for another
+	// type) changes tokenization semantics and is rejected outright.
+	if file.Model.Type == "Unigram" && normalizerType != "Precompiled" {
 		return nil, fmt.Errorf("Unigram tokenizer normalizer %q is unsupported; expected Precompiled", normalizerType)
 	}
 	result := &Tokenizer{
@@ -113,6 +135,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		handleChineseChars: handleChinese, stripAccents: stripAccents,
 		lowercase: lowercase, normalizerType: normalizerType,
 		metaspaceReplacement: "▁", metaspacePrefixSpace: true,
+		addedTokens: file.AddedTokens,
 	}
 	if charsmap != "" {
 		data, decodeErr := base64.StdEncoding.DecodeString(charsmap)
@@ -209,10 +232,7 @@ func (t *Tokenizer) loadUnigram(file tokenizerFile) (*Tokenizer, error) {
 	return t, nil
 }
 
-func specialIDs(added []struct {
-	ID      int    `json:"id"`
-	Content string `json:"content"`
-}, vocab map[string]int) (int, int, int) {
+func specialIDs(added []addedToken, vocab map[string]int) (int, int, int) {
 	classID, separatorID, padID := -1, -1, -1
 	for _, name := range []string{"[CLS]", "<s>"} {
 		if id, ok := vocab[name]; ok {
@@ -255,7 +275,7 @@ func (t *Tokenizer) Encode(text string) (ids, mask, types []int64, err error) {
 	}
 	var tokens []int
 	if t.kind == unigramKind {
-		tokens = t.unigram.encode(t.normalizeUnigram(text), t.metaspaceReplacement, t.metaspacePrefixSpace)
+		tokens = t.encodeUnigram(text)
 	} else {
 		for _, word := range t.preTokenize(t.normalize(text)) {
 			tokens = append(tokens, t.wordPiece.encode(word)...)
