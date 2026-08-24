@@ -1,7 +1,7 @@
 """ALL-199: ops_outbox fault-injection matrix, isomorphic with the authoritative contract.
 
 Authoritative contract (single source, decided in ALL-199 -- no design change needed,
-ALL-69 v2.0 5.4 and ADR-004 v2.1 Decision 4 already agree; the ALL-196 test diverged):
+ALL-69 v2.1 5.4 and ADR-004 v2.2 Decision 4 already agree; the ALL-196 test diverged):
 
   create/update       (1) outbox(pending) + memories row  [ONE SQLite txn]
                       (2) temp file + atomic rename -> dst_path
@@ -46,7 +46,7 @@ def check(name, got, want):
 
 
 # ---------------------------------------------------------------------------
-# Delivered DDL, copied verbatim out of ALL-69 v2.0 5.4. Executed as-is; no
+# Delivered DDL, copied verbatim out of ALL-69 v2.1 5.4. Executed as-is; no
 # reduced stand-in schema (ALL-199 required fix 2).
 # ---------------------------------------------------------------------------
 # Both docs are git-tracked (ALL-201 R2-1): the fail-closed read below is only a
@@ -472,7 +472,7 @@ def converged(db, vault, mem_id, expect_path, expect_status="active", expect_bod
 
 
 print("=" * 78)
-print("ALL-199 ops_outbox fault injection -- contract: ALL-69 v2.0 5.4 / ADR-004 v2.1 D4")
+print("ALL-199 ops_outbox fault injection -- contract: ALL-69 v2.1 5.4 / ADR-004 v2.2 D4")
 print("=" * 78)
 
 # ===== 0. schema and order are the delivered contract, not a stand-in ==========
@@ -819,8 +819,3 @@ if FAILURES:
     sys.exit(1)
 print("ops_outbox fault injection: ALL PASS")
 sys.exit(0)
-
-
-
-
-
