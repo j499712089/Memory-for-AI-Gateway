@@ -13,12 +13,9 @@ import (
 )
 
 const (
-	Dimensions        = 384
-	ModelVersion      = "paraphrase-multilingual-MiniLM-L12-v2"
-	defaultRuntimeDLL = "onnxruntime.dll"
+	Dimensions   = 384
+	ModelVersion = "paraphrase-multilingual-MiniLM-L12-v2"
 )
-
-var runtimeMu sync.Mutex
 
 // Service owns one ONNX session and its matching tokenizer. The
 // session is shared by workers and retrieval queries so both paths use the
@@ -59,31 +56,6 @@ func NewService(modelPath, tokenizerPath string) (*Service, error) {
 		modelPath: modelPath, tokenizerPath: tokenizerPath, tokenizer: tokenizer,
 		session: session, inputNames: inputNames, outputName: outputName,
 	}, nil
-}
-
-func initializeRuntime(modelPath string) error {
-	runtimeMu.Lock()
-	defer runtimeMu.Unlock()
-	if ort.IsInitialized() {
-		return nil
-	}
-	sharedPath := os.Getenv("ONNXRUNTIME_SHARED_LIBRARY_PATH")
-	if sharedPath == "" {
-		sharedPath = os.Getenv("ONNXRUNTIME_DLL_PATH")
-	}
-	if sharedPath == "" {
-		candidate := filepath.Join(filepath.Dir(modelPath), defaultRuntimeDLL)
-		if _, err := os.Stat(candidate); err == nil {
-			sharedPath = candidate
-		}
-	}
-	if sharedPath != "" {
-		ort.SetSharedLibraryPath(sharedPath)
-	}
-	if err := ort.InitializeEnvironment(ort.WithLogLevelWarning()); err != nil {
-		return fmt.Errorf("load %s (set ONNXRUNTIME_SHARED_LIBRARY_PATH to its absolute path): %w", defaultRuntimeDLL, err)
-	}
-	return nil
 }
 
 func modelIO(path string) ([]string, string, error) {

@@ -11,48 +11,45 @@
 # 3. Compute cosine similarity for all pairs
 # 4. Set thresholds based on observed distribution with safety margins
 #
-# Last calibrated: 2026-08-22
-# Model: F:\AI\models\all-MiniLM-L6-v2\model_quantized.onnx (sha256 hash placeholder)
+# Last calibrated: 2026-08-24
+# Model: F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\model_quantized.onnx
 # Dimensions: 384
 
 version: 1
 
 thresholds:
-  # English thresholds - calibrated and verified
+  # English thresholds - calibrated against the approved multilingual model
   en:
-    synonym_min: 0.5      # Minimum cosine similarity for synonymous text pairs
-    unrelated_max: 0.3    # Maximum cosine similarity for unrelated text pairs
+    synonym_min: 0.79     # Min observed 0.8393, margin -0.05
+    unrelated_max: 0.10   # Max observed 0.0491, margin +0.05
     separation_min: 0.15  # Minimum separation: min(synonym) - max(unrelated)
 
-    # Observed distribution (for reference):
-    # - Synonymous pairs: 0.81-0.93
-    # - Unrelated pairs: 0.00-0.05
-    # - Actual separation: ~0.76
+    # Observed distribution (2026-08-24, paraphrase-multilingual-MiniLM-L12-v2):
+    # - Synonymous pairs: 0.8946 / 0.8393 / 0.8980 / 0.9275
+    # - Unrelated pairs: -0.0313 / 0.0181 / 0.0491 / -0.0156
+    # - Actual separation: 0.7902
 
-  # Chinese thresholds - PENDING ALL-159 model decision
+  # Chinese thresholds - calibrated against the approved multilingual model
   zh:
-    synonym_min: 0.55     # PLACEHOLDER - recalibrate after model selection
-    unrelated_max: 0.45   # PLACEHOLDER - recalibrate after model selection
+    synonym_min: 0.71     # Min observed 0.7594, margin -0.05
+    unrelated_max: 0.14   # Max observed 0.0894, margin +0.05
     separation_min: 0.15  # Relative separation (model-independent)
 
-    # Known issue with all-MiniLM-L6-v2:
-    # - 85% of CJK characters fall into [UNK] tokens
-    # - Vector space collapse causes unrelated pairs to score 0.41-0.47
-    # - Current thresholds are INVALID for Chinese text
-    #
-    # Pending decision (ALL-159):
-    # - Option A: paraphrase-multilingual-MiniLM-L12-v2 (250k vocab, 384-dim)
-    # - Option B: bge-small-zh-v1.5 (optimal Chinese, 512-dim)
-    # - Option C: Keep all-MiniLM-L6-v2 and drop Chinese retrieval requirement
+    # Observed distribution (2026-08-24, paraphrase-multilingual-MiniLM-L12-v2):
+    # - Synonymous pairs: 0.7594 / 0.8790 / 0.9580 / 0.8712
+    # - Unrelated pairs: 0.0894 / -0.0125 / 0.0160 / 0.0578
+    # - Actual separation: 0.6700
 
 # Calibration metadata
 calibration:
-  model_path: "F:\\AI\\models\\all-MiniLM-L6-v2\\model_quantized.onnx"
-  model_size_bytes: 22972370
-  model_sha256: "PENDING"  # Run: certutil -hashfile <path> SHA256
-  tokenizer_path: "F:\\AI\\models\\all-MiniLM-L6-v2\\tokenizer.json"
-  calibration_date: "2026-08-22"
-  calibrator: "ALL-160"
+  model_path: "F:\\AI\\models\\paraphrase-multilingual-MiniLM-L12-v2\\model_quantized.onnx"
+  model_size_bytes: 118308126
+  model_sha256: "66FC00F5F29AFCAFF34092E1BDD20008CA3918265A82FB9695A551E510CC4EBC"
+  tokenizer_path: "F:\\AI\\models\\paraphrase-multilingual-MiniLM-L12-v2\\tokenizer.json"
+  tokenizer_sha256: "B60B6B43406A48BF3638526314F3D232D97058BC93472FF2DE930D43686FA441"
+  onnxruntime_path: "F:\\AI\\models\\paraphrase-multilingual-MiniLM-L12-v2\\onnxruntime.dll"
+  calibration_date: "2026-08-24"
+  calibrator: "ALL-195"
 
   # When to recalibrate:
   # - Model file changes (different sha256)
@@ -66,4 +63,4 @@ calibration:
 # 2. Tests MUST verify both absolute thresholds AND relative separation
 # 3. Hash-based placeholder implementations will fail synonym_min check
 # 4. DO NOT hardcode thresholds in test code - always reference this file
-# 5. After ALL-159 model decision, re-run calibration script and update zh section
+# 5. Thresholds are calibrated for paraphrase-multilingual-MiniLM-L12-v2

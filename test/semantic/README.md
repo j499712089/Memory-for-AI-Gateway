@@ -34,8 +34,8 @@ go test -run TestCalibration -v
 
 # Or use as a library
 go run calibrate_main.go \
-  --model "F:\AI\models\all-MiniLM-L6-v2\model_quantized.onnx" \
-  --tokenizer "F:\AI\models\all-MiniLM-L6-v2\tokenizer.json"
+  --model "F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\model_quantized.onnx" \
+  --tokenizer "F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\tokenizer.json"
 ```
 
 ### Running Validation Tests
@@ -86,10 +86,10 @@ Tests MUST:
 After model selection, re-run calibration:
 
 ```bash
-# Example: If switching to paraphrase-multilingual-MiniLM-L12-v2
+# Approved model (ALL-159): paraphrase-multilingual-MiniLM-L12-v2
 cd test/semantic
 go run calibrate_main.go \
-  --model "F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\model.onnx" \
+  --model "F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\model_quantized.onnx" \
   --tokenizer "F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\tokenizer.json" \
   --output thresholds.yml
 

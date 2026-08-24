@@ -50,10 +50,11 @@ func TestSemanticValidityEnglish(t *testing.T) {
 
 	enThresh := config.Thresholds["en"]
 
-	// Initialize embedding service
+	// Initialize embedding service. A P0 gate must FAIL when the service is
+	// unavailable; skipping here would let a broken implementation report ok.
 	service, err := embedding.NewService(config.Calibration.ModelPath, config.Calibration.TokenizerPath)
 	if err != nil {
-		t.Skipf("Embedding service not available: %v", err)
+		t.Fatalf("Embedding service not available: %v", err)
 	}
 
 	// Test synonymous pairs - should have HIGH similarity
@@ -102,7 +103,7 @@ func TestSemanticValidityEnglish(t *testing.T) {
 }
 
 // TestSemanticValidityChinese verifies semantic validity for Chinese text.
-// This test is PENDING ALL-159 model decision and threshold recalibration.
+// Thresholds are calibrated against the approved multilingual model (ALL-195).
 func TestSemanticValidityChinese(t *testing.T) {
 	config, err := LoadThresholds("thresholds.yml")
 	if err != nil {
@@ -111,10 +112,10 @@ func TestSemanticValidityChinese(t *testing.T) {
 
 	zhThresh := config.Thresholds["zh"]
 
-	// Initialize embedding service
+	// Initialize embedding service. P0 gate: fail, never skip.
 	service, err := embedding.NewService(config.Calibration.ModelPath, config.Calibration.TokenizerPath)
 	if err != nil {
-		t.Skipf("Embedding service not available: %v", err)
+		t.Fatalf("Embedding service not available: %v", err)
 	}
 
 	// Test synonymous pairs
@@ -173,7 +174,7 @@ func TestEncodingConsistency(t *testing.T) {
 
 	service, err := embedding.NewService(config.Calibration.ModelPath, config.Calibration.TokenizerPath)
 	if err != nil {
-		t.Skipf("Embedding service not available: %v", err)
+		t.Fatalf("Embedding service not available: %v", err)
 	}
 
 	testTexts := []string{
@@ -214,7 +215,7 @@ func TestRelativeSeparation(t *testing.T) {
 
 	service, err := embedding.NewService(config.Calibration.ModelPath, config.Calibration.TokenizerPath)
 	if err != nil {
-		t.Skipf("Embedding service not available: %v", err)
+		t.Fatalf("Embedding service not available: %v", err)
 	}
 
 	languages := []struct {
