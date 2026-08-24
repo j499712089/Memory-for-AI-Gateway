@@ -20,7 +20,7 @@ const (
 
 var runtimeMu sync.Mutex
 
-// Service owns one ONNX session and its matching WordPiece tokenizer. The
+// Service owns one ONNX session and its matching tokenizer. The
 // session is shared by workers and retrieval queries so both paths use the
 // exact same encoder and vector space.
 type Service struct {

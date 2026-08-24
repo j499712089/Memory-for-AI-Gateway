@@ -1,37 +1,52 @@
 package embedding
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
-	"unicode"
-	"unicode/utf8"
 
-	"golang.org/x/text/unicode/norm"
+	"github.com/sugarme/tokenizer/spm"
 )
 
 const defaultSequenceLength = 128
 
 type tokenizerModel struct {
-	Type                    string         `json:"type"`
-	UnkToken                string         `json:"unk_token"`
-	ContinuingSubwordPrefix string         `json:"continuing_subword_prefix"`
-	MaxInputCharsPerWord    int            `json:"max_input_chars_per_word"`
-	Vocab                   map[string]int `json:"vocab"`
+	Type                    string          `json:"type"`
+	UnkToken                string          `json:"unk_token"`
+	UnkID                   int             `json:"unk_id"`
+	ContinuingSubwordPrefix string          `json:"continuing_subword_prefix"`
+	MaxInputCharsPerWord    int             `json:"max_input_chars_per_word"`
+	Vocab                   json.RawMessage `json:"vocab"`
+}
+
+type tokenizerNormalizer struct {
+	Type                string `json:"type"`
+	PrecompiledCharsmap string `json:"precompiled_charsmap"`
+	CleanText           bool   `json:"clean_text"`
+	HandleChineseChars  bool   `json:"handle_chinese_chars"`
+	StripAccents        *bool  `json:"strip_accents"`
+	Lowercase           bool   `json:"lowercase"`
 }
 
 type tokenizerFile struct {
 	Truncation *struct {
 		MaxLength int `json:"max_length"`
 	} `json:"truncation"`
-	Normalizer *struct {
-		Type               string `json:"type"`
-		CleanText          bool   `json:"clean_text"`
-		HandleChineseChars bool   `json:"handle_chinese_chars"`
-		StripAccents       *bool  `json:"strip_accents"`
-		Lowercase          bool   `json:"lowercase"`
-	} `json:"normalizer"`
+	Padding *struct {
+		PadID int `json:"pad_id"`
+	} `json:"padding"`
+	Normalizer   *tokenizerNormalizer `json:"normalizer"`
+	PreTokenizer *struct {
+		Type          string `json:"type"`
+		Replacement   string `json:"replacement"`
+		AddPrefix     bool   `json:"add_prefix_space"`
+		Pretokenizers []struct {
+			Type        string `json:"type"`
+			Replacement string `json:"replacement"`
+			AddPrefix   bool   `json:"add_prefix_space"`
+		} `json:"pretokenizers"`
+	} `json:"pre_tokenizer"`
 	AddedTokens []struct {
 		ID      int    `json:"id"`
 		Content string `json:"content"`
@@ -39,21 +54,32 @@ type tokenizerFile struct {
 	Model tokenizerModel `json:"model"`
 }
 
-// Tokenizer is the WordPiece/BertNormalizer tokenizer exported with the ONNX
-// model. It deliberately keeps no mutable per-request state.
+type tokenizerKind uint8
+
+const (
+	wordPieceKind tokenizerKind = iota
+	unigramKind
+)
+
+// Tokenizer owns one immutable model-specific encoder. Encode is shared by
+// document writes and retrieval queries to keep their vector inputs identical.
 type Tokenizer struct {
-	vocab                map[string]int
+	kind                 tokenizerKind
+	wordPiece            *wordPieceTokenizer
+	unigram              *unigramTokenizer
 	unknownID            int
 	classID              int
 	separatorID          int
 	padID                int
-	maxInputCharsPerWord int
-	continuingPrefix     string
 	sequenceLength       int
 	cleanText            bool
 	handleChineseChars   bool
 	stripAccents         bool
 	lowercase            bool
+	normalizerType       string
+	metaspaceReplacement string
+	metaspacePrefixSpace bool
+	precompiled          *spm.Precompiled
 }
 
 func LoadTokenizer(path string) (*Tokenizer, error) {
@@ -65,69 +91,158 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("parse tokenizer: %w", err)
 	}
-	if file.Model.Type != "WordPiece" || len(file.Model.Vocab) == 0 {
-		return nil, fmt.Errorf("tokenizer model must be WordPiece with a vocabulary")
+	if len(file.Model.Vocab) == 0 {
+		return nil, fmt.Errorf("tokenizer model has no vocabulary")
 	}
-	unknownID, ok := file.Model.Vocab[file.Model.UnkToken]
+	sequenceLength := defaultSequenceLength
+	if file.Truncation != nil && file.Truncation.MaxLength > 0 {
+		if file.Truncation.MaxLength != defaultSequenceLength {
+			return nil, fmt.Errorf("tokenizer truncation max_length is %d, want %d", file.Truncation.MaxLength, defaultSequenceLength)
+		}
+		sequenceLength = file.Truncation.MaxLength
+	}
+	normalizerType, cleanText, handleChinese, stripAccents, lowercase, charsmap, err := normalizerConfig(file.Normalizer)
+	if err != nil {
+		return nil, err
+	}
+	if file.Model.Type == "Unigram" && normalizerType != "" && normalizerType != "Precompiled" {
+		return nil, fmt.Errorf("Unigram tokenizer normalizer %q is unsupported; expected Precompiled", normalizerType)
+	}
+	result := &Tokenizer{
+		sequenceLength: sequenceLength, cleanText: cleanText,
+		handleChineseChars: handleChinese, stripAccents: stripAccents,
+		lowercase: lowercase, normalizerType: normalizerType,
+		metaspaceReplacement: "▁", metaspacePrefixSpace: true,
+	}
+	if charsmap != "" {
+		data, decodeErr := base64.StdEncoding.DecodeString(charsmap)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode Precompiled charsmap: %w", decodeErr)
+		}
+		if err := validatePrecompiledCharsmap(data); err != nil {
+			return nil, err
+		}
+		precompiled, createErr := spm.NewPrecompiledFrom(data)
+		if createErr != nil {
+			return nil, fmt.Errorf("load Precompiled charsmap: %w", createErr)
+		}
+		result.precompiled = precompiled
+	}
+	if file.Padding != nil {
+		result.padID = file.Padding.PadID
+	}
+	if file.PreTokenizer != nil && file.PreTokenizer.Type == "Metaspace" {
+		result.metaspaceReplacement = file.PreTokenizer.Replacement
+		result.metaspacePrefixSpace = file.PreTokenizer.AddPrefix
+	} else if file.PreTokenizer != nil {
+		for _, pretokenizer := range file.PreTokenizer.Pretokenizers {
+			if pretokenizer.Type == "Metaspace" {
+				result.metaspaceReplacement = pretokenizer.Replacement
+				result.metaspacePrefixSpace = pretokenizer.AddPrefix
+				break
+			}
+		}
+	}
+	switch file.Model.Type {
+	case "WordPiece":
+		return result.loadWordPiece(file)
+	case "Unigram":
+		return result.loadUnigram(file)
+	default:
+		return nil, fmt.Errorf("unsupported tokenizer model %q", file.Model.Type)
+	}
+}
+
+func (t *Tokenizer) loadWordPiece(file tokenizerFile) (*Tokenizer, error) {
+	var vocab map[string]int
+	if err := json.Unmarshal(file.Model.Vocab, &vocab); err != nil || len(vocab) == 0 {
+		return nil, fmt.Errorf("WordPiece tokenizer vocabulary must be an object")
+	}
+	unknownID, ok := vocab[file.Model.UnkToken]
 	if !ok {
 		return nil, fmt.Errorf("tokenizer vocabulary is missing %q", file.Model.UnkToken)
 	}
-	classID, classOK := file.Model.Vocab["[CLS]"]
-	separatorID, separatorOK := file.Model.Vocab["[SEP]"]
-	padID, padOK := file.Model.Vocab["[PAD]"]
-	for _, token := range file.AddedTokens {
-		switch token.Content {
-		case "[CLS]":
-			classID, classOK = token.ID, true
-		case "[SEP]":
-			separatorID, separatorOK = token.ID, true
-		case "[PAD]":
-			padID, padOK = token.ID, true
-		}
-	}
-	if !classOK || !separatorOK || !padOK {
-		return nil, fmt.Errorf("tokenizer vocabulary must define [CLS], [SEP], and [PAD]")
+	t.classID, t.separatorID, t.padID = specialIDs(file.AddedTokens, vocab)
+	if t.classID < 0 || t.separatorID < 0 {
+		return nil, fmt.Errorf("tokenizer vocabulary must define [CLS] and [SEP]")
 	}
 	maxChars := file.Model.MaxInputCharsPerWord
 	if maxChars <= 0 {
 		maxChars = 100
 	}
-	sequenceLength := defaultSequenceLength
-	if file.Truncation != nil && file.Truncation.MaxLength > 0 {
-		sequenceLength = file.Truncation.MaxLength
-	}
-	stripAccents := false
-	lowercase := false
-	cleanText := true
-	handleChineseChars := true
-	if file.Normalizer != nil {
-		lowercase = file.Normalizer.Lowercase
-		cleanText = file.Normalizer.CleanText
-		handleChineseChars = file.Normalizer.HandleChineseChars
-		if file.Normalizer.StripAccents != nil {
-			stripAccents = *file.Normalizer.StripAccents
-		} else {
-			stripAccents = lowercase
-		}
-	}
 	prefix := file.Model.ContinuingSubwordPrefix
 	if prefix == "" {
 		prefix = "##"
 	}
-	return &Tokenizer{
-		vocab:                file.Model.Vocab,
-		unknownID:            unknownID,
-		classID:              classID,
-		separatorID:          separatorID,
-		padID:                padID,
-		maxInputCharsPerWord: maxChars,
-		continuingPrefix:     prefix,
-		sequenceLength:       sequenceLength,
-		cleanText:            cleanText,
-		handleChineseChars:   handleChineseChars,
-		stripAccents:         stripAccents,
-		lowercase:            lowercase,
-	}, nil
+	t.kind, t.unknownID = wordPieceKind, unknownID
+	t.wordPiece = &wordPieceTokenizer{vocab: vocab, unknownID: unknownID, maxInputChars: maxChars, continuingPrefix: prefix}
+	return t, nil
+}
+
+func (t *Tokenizer) loadUnigram(file tokenizerFile) (*Tokenizer, error) {
+	if file.Padding == nil {
+		return nil, fmt.Errorf("Unigram tokenizer is missing padding.pad_id")
+	}
+	pieces, err := parseUnigramVocab(file.Model.Vocab)
+	if err != nil {
+		return nil, err
+	}
+	vocabIDs := make(map[string]int, len(pieces))
+	for id, piece := range pieces {
+		vocabIDs[piece.token] = id
+	}
+	unknownID := file.Model.UnkID
+	if unknownID < 0 || unknownID >= len(pieces) {
+		unknownID = vocabIDs["<unk>"]
+	}
+	classID, separatorID, padID := specialIDs(file.AddedTokens, vocabIDs)
+	t.classID, t.separatorID = classID, separatorID
+	if t.classID < 0 || t.separatorID < 0 || padID < 0 {
+		return nil, fmt.Errorf("Unigram tokenizer must define <s>, </s>, and <pad>")
+	}
+	if file.Padding.PadID != padID {
+		return nil, fmt.Errorf("Unigram padding pad_id=%d conflicts with <pad> vocabulary id=%d", file.Padding.PadID, padID)
+	}
+	t.padID = file.Padding.PadID
+	t.kind, t.unknownID = unigramKind, unknownID
+	t.unigram = newUnigramTokenizer(pieces, unknownID)
+	return t, nil
+}
+
+func specialIDs(added []struct {
+	ID      int    `json:"id"`
+	Content string `json:"content"`
+}, vocab map[string]int) (int, int, int) {
+	classID, separatorID, padID := -1, -1, -1
+	for _, name := range []string{"[CLS]", "<s>"} {
+		if id, ok := vocab[name]; ok {
+			classID = id
+			break
+		}
+	}
+	for _, name := range []string{"[SEP]", "</s>"} {
+		if id, ok := vocab[name]; ok {
+			separatorID = id
+			break
+		}
+	}
+	for _, name := range []string{"[PAD]", "<pad>"} {
+		if id, ok := vocab[name]; ok {
+			padID = id
+			break
+		}
+	}
+	for _, token := range added {
+		switch token.Content {
+		case "[CLS]", "<s>":
+			classID = token.ID
+		case "[SEP]", "</s>":
+			separatorID = token.ID
+		case "[PAD]", "<pad>":
+			padID = token.ID
+		}
+	}
+	return classID, separatorID, padID
 }
 
 // Encode returns fixed-length input_ids, attention_mask and token_type_ids.
@@ -135,10 +250,17 @@ func (t *Tokenizer) Encode(text string) (ids, mask, types []int64, err error) {
 	if t == nil {
 		return nil, nil, nil, fmt.Errorf("tokenizer is nil")
 	}
-	if strings.TrimSpace(text) == "" {
+	if !validUTF8(text) || isBlank(text) {
 		return nil, nil, nil, fmt.Errorf("text is required")
 	}
-	words := t.preTokenize(t.normalize(text))
+	var tokens []int
+	if t.kind == unigramKind {
+		tokens = t.unigram.encode(t.normalizeUnigram(text), t.metaspaceReplacement, t.metaspacePrefixSpace)
+	} else {
+		for _, word := range t.preTokenize(t.normalize(text)) {
+			tokens = append(tokens, t.wordPiece.encode(word)...)
+		}
+	}
 	ids = make([]int64, t.sequenceLength)
 	mask = make([]int64, t.sequenceLength)
 	types = make([]int64, t.sequenceLength)
@@ -148,17 +270,12 @@ func (t *Tokenizer) Encode(text string) (ids, mask, types []int64, err error) {
 	position := 0
 	ids[position], mask[position] = int64(t.classID), 1
 	position++
-	for _, word := range words {
-		for _, id := range t.wordPiece(word) {
-			if position >= t.sequenceLength-1 {
-				break
-			}
-			ids[position], mask[position] = int64(id), 1
-			position++
-		}
+	for _, id := range tokens {
 		if position >= t.sequenceLength-1 {
 			break
 		}
+		ids[position], mask[position] = int64(id), 1
+		position++
 	}
 	if position >= t.sequenceLength {
 		position = t.sequenceLength - 1
@@ -167,102 +284,10 @@ func (t *Tokenizer) Encode(text string) (ids, mask, types []int64, err error) {
 	return ids, mask, types, nil
 }
 
-func (t *Tokenizer) normalize(text string) string {
-	var b strings.Builder
-	for _, r := range text {
-		if t.cleanText && (r == 0 || r == '\ufffd' || unicode.IsControl(r)) {
-			continue
-		}
-		if t.cleanText && unicode.IsSpace(r) {
-			r = ' '
-		}
-		if t.handleChineseChars && isChinese(r) {
-			b.WriteByte(' ')
-			b.WriteRune(r)
-			b.WriteByte(' ')
-			continue
-		}
-		b.WriteRune(r)
+// PadID reports the artifact-declared right-padding token id.
+func (t *Tokenizer) PadID() int {
+	if t == nil {
+		return -1
 	}
-	value := b.String()
-	if t.lowercase {
-		value = strings.ToLower(value)
-	}
-	if t.stripAccents {
-		value = stripDiacritics(value)
-	}
-	return value
+	return t.padID
 }
-
-func (t *Tokenizer) preTokenize(text string) []string {
-	var words []string
-	var current []rune
-	flush := func() {
-		if len(current) > 0 {
-			words = append(words, string(current))
-			current = current[:0]
-		}
-	}
-	for _, r := range text {
-		if unicode.IsSpace(r) {
-			flush()
-		} else if unicode.IsPunct(r) || unicode.IsSymbol(r) {
-			flush()
-			words = append(words, string(r))
-		} else {
-			current = append(current, r)
-		}
-	}
-	flush()
-	return words
-}
-
-func (t *Tokenizer) wordPiece(word string) []int {
-	runes := []rune(word)
-	if len(runes) == 0 || len(runes) > t.maxInputCharsPerWord {
-		return []int{t.unknownID}
-	}
-	pieces := make([]int, 0, len(runes))
-	for start := 0; start < len(runes); {
-		end := len(runes)
-		found := false
-		for start < end {
-			piece := string(runes[start:end])
-			if start > 0 {
-				piece = t.continuingPrefix + piece
-			}
-			if id, ok := t.vocab[piece]; ok {
-				pieces = append(pieces, id)
-				start = end
-				found = true
-				break
-			}
-			end--
-		}
-		if !found {
-			return []int{t.unknownID}
-		}
-	}
-	return pieces
-}
-
-func isChinese(r rune) bool {
-	return (r >= 0x4e00 && r <= 0x9fff) || (r >= 0x3400 && r <= 0x4dbf) ||
-		(r >= 0x20000 && r <= 0x2a6df) || (r >= 0x2a700 && r <= 0x2b73f) ||
-		(r >= 0x2b740 && r <= 0x2b81f) || (r >= 0x2b820 && r <= 0x2ceaf) ||
-		(r >= 0xf900 && r <= 0xfaff)
-}
-
-func stripDiacritics(value string) string {
-	// BertNormalizer removes combining marks after NFD decomposition.
-	var b strings.Builder
-	for _, r := range norm.NFD.String(value) {
-		if unicode.Is(unicode.Mn, r) {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-func validUTF8(value string) bool { return utf8.ValidString(value) }
