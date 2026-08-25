@@ -232,6 +232,7 @@ func TestGatewayEmbeddingInjectionSurfacesSemanticMemory(t *testing.T) {
 		t.Fatal("upstream payload not captured")
 	}
 	injected := string(payload)
+	t.Logf("upstream payload contains memory=%t source_id=%t\n%s", strings.Contains(injected, zhArchivalMemoryText), strings.Contains(injected, zhArchivalSourceEventID), injected)
 
 	// The synonym memory and its source_id must reach the upstream payload.
 	if !strings.Contains(injected, zhArchivalMemoryText) {
