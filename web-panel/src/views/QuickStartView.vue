@@ -1,0 +1,300 @@
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useTeamsStore } from '@/stores/teams'
+import { useApiKeysStore } from '@/stores/apiKeys'
+import { useIdentityCardsStore } from '@/stores/identityCards'
+import AppIcon from '@/components/AppIcon.vue'
+import ConnectionTestPanel from '@/components/ConnectionTestPanel.vue'
+import SetupCompletePanel from '@/components/SetupCompletePanel.vue'
+import UpstreamConfigPanel from '@/components/UpstreamConfigPanel.vue'
+import QuickStartProgress from '@/components/QuickStartProgress.vue'
+import type { TeamCreateInput, ApiKeyCreateInput, IdentityCardCreateInput, UpstreamProvider } from '@/api/types'
+const router = useRouter()
+const teamsStore = useTeamsStore()
+const keysStore = useApiKeysStore()
+const cardsStore = useIdentityCardsStore()
+const currentStep = ref(1)
+const teamName = ref('')
+const teamSlug = ref('')
+const teamDescription = ref('')
+const keyName = ref('')
+const keyScopes = ref(['memories:read', 'memories:write'])
+const cardName = ref('')
+const cardPersona = ref('')
+const agentId = ref('')
+const submitting = ref(false)
+const createdTeamId = ref('')
+const createdKeyValue = ref('')
+const upstreamConfigured = ref(false)
+const upstreamProvider = ref<UpstreamProvider | null>(null)
+const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8096'
+const canProceed = computed(() => {
+  if (currentStep.value === 1) return teamName.value && teamSlug.value
+  if (currentStep.value === 2) return keyName.value
+  if (currentStep.value === 3) return cardName.value
+  return true
+})
+async function handleStep1() {
+  submitting.value = true
+  try {
+    const input: TeamCreateInput = {
+      name: teamName.value,
+      slug: teamSlug.value,
+      description: teamDescription.value || undefined,
+    }
+    const team = await teamsStore.createTeam(input)
+    createdTeamId.value = team.id
+    currentStep.value = 2
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function handleStep2() {
+  submitting.value = true
+  try {
+    const input: ApiKeyCreateInput = {
+      name: keyName.value,
+      team_id: createdTeamId.value,
+      owner_id: createdTeamId.value,
+      scopes: keyScopes.value,
+    }
+    const result = await keysStore.createKey(input)
+    createdKeyValue.value = result.key
+    currentStep.value = 3
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function handleStep3() {
+  submitting.value = true
+  try {
+    const input: IdentityCardCreateInput = {
+      name: cardName.value,
+      role: 'assistant',
+      responsibilities: cardPersona.value || 'AI助手职责',
+      boundaries: '遵守用户指令',
+      agent_id: agentId.value || undefined,
+    }
+    await cardsStore.createCard(createdTeamId.value, input)
+    currentStep.value = 4
+  } finally {
+    submitting.value = false
+  }
+}
+
+function goToDashboard() {
+  router.push('/teams')
+}
+
+function completeUpstreamSetup(provider: UpstreamProvider) {
+  upstreamConfigured.value = true
+  upstreamProvider.value = provider
+  currentStep.value = 7
+}
+
+function skipUpstreamSetup() {
+  currentStep.value = 7
+}
+
+onMounted(async () => {
+  await teamsStore.fetchTeams()
+})
+</script>
+
+<template>
+  <div class="mx-auto max-w-3xl space-y-6">
+    <div>
+      <h1 class="text-xl font-semibold">快速开始向导</h1>
+      <p class="text-sm text-gray-500">5 分钟完成 Memory Gateway 基础配置</p>
+    </div>
+
+    <QuickStartProgress :current-step="currentStep" />
+
+    <div v-if="currentStep === 1" class="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+      <div>
+        <h2 class="text-lg font-medium">步骤 1：创建第一个 Team</h2>
+        <p class="text-sm text-gray-500">Team 用于组织身份卡片和 API Key 权限</p>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Team 名称*</label>
+          <input
+            v-model="teamName"
+            type="text"
+            placeholder="例如：我的 AI 助手团队"
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Slug*</label>
+          <input
+            v-model="teamSlug"
+            type="text"
+            placeholder="例如：my-team"
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 font-mono text-sm focus:border-blue-500 focus:outline-none"
+          />
+          <p class="mt-1 text-xs text-gray-500">仅限小写字母、数字、连字符</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">描述（可选）</label>
+          <textarea
+            v-model="teamDescription"
+            rows="2"
+            placeholder="简要描述这个 Team 的用途"
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          ></textarea>
+        </div>
+      </div>
+      <div class="flex justify-end">
+        <button
+          :disabled="!canProceed || submitting"
+          class="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          @click="handleStep1"
+        >
+          {{ submitting ? '创建中...' : '下一步' }}
+        </button>
+      </div>
+    </div>
+
+    <div v-if="currentStep === 2" class="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+      <div>
+        <h2 class="text-lg font-medium">步骤 2：生成第一个 API Key</h2>
+        <p class="text-sm text-gray-500">API Key 用于客户端调用 Gateway 服务</p>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Key 名称*</label>
+          <input
+            v-model="keyName"
+            type="text"
+            placeholder="例如：Production Key"
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">权限范围</label>
+          <div class="mt-2 space-y-2">
+            <label class="flex items-center">
+              <input v-model="keyScopes" type="checkbox" value="memories:read" class="mr-2" />
+              <span class="text-sm">memories:read（读取记忆）</span>
+            </label>
+            <label class="flex items-center">
+              <input v-model="keyScopes" type="checkbox" value="memories:write" class="mr-2" />
+              <span class="text-sm">memories:write（写入记忆）</span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-between">
+        <button
+          class="rounded border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+          @click="currentStep = 1"
+        >
+          上一步
+        </button>
+        <button
+          :disabled="!canProceed || submitting"
+          class="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          @click="handleStep2"
+        >
+          {{ submitting ? '生成中...' : '下一步' }}
+        </button>
+      </div>
+    </div>
+
+    <div v-if="currentStep === 3" class="space-y-4 rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+      <div>
+        <h2 class="text-lg font-medium">步骤 3：创建身份卡片并绑定 Agent</h2>
+        <p class="text-sm text-gray-500">身份卡片定义 AI 助手的身份和记忆存储位置</p>
+      </div>
+      <div v-if="createdKeyValue" class="rounded bg-yellow-50 p-3 text-sm">
+        <div class="flex items-center gap-2 font-medium text-yellow-800">
+          <AppIcon class="h-4 w-4 shrink-0" name="triangle-alert" />
+          <span>请保存您的 API Key（仅展示一次）</span>
+        </div>
+        <div class="mt-2 overflow-x-auto rounded bg-white p-2 font-mono text-xs">{{ createdKeyValue }}</div>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">身份卡片名称*</label>
+          <input
+            v-model="cardName"
+            type="text"
+            placeholder="例如：我的 AI 助手"
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Persona（可选）</label>
+          <textarea
+            v-model="cardPersona"
+            rows="2"
+            placeholder="例如：你是一个专业的技术顾问..."
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          ></textarea>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Agent ID（可选）</label>
+          <input
+            v-model="agentId"
+            type="text"
+            placeholder="例如：agent-123"
+            class="mt-1 w-full rounded border border-gray-300 px-3 py-2 font-mono text-sm focus:border-blue-500 focus:outline-none"
+          />
+          <p class="mt-1 text-xs text-gray-500">用于绑定客户端 Agent</p>
+        </div>
+      </div>
+      <div class="flex justify-between">
+        <button
+          class="rounded border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+          @click="currentStep = 2"
+        >
+          上一步
+        </button>
+        <button
+          :disabled="!canProceed || submitting"
+          class="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          @click="handleStep3"
+        >
+          {{ submitting ? '创建中...' : '下一步' }}
+        </button>
+      </div>
+    </div>
+
+    <ConnectionTestPanel
+      v-if="currentStep === 4"
+      :api-base="apiBase"
+      :api-key="createdKeyValue"
+      @back="currentStep = 3"
+      @next="currentStep = 5"
+    />
+
+    <SetupCompletePanel
+      v-if="currentStep === 5 || currentStep === 7"
+      :api-base="apiBase"
+      :card-name="cardName"
+      :gateway-key="createdKeyValue"
+      :key-name="keyName"
+      :show-continue="currentStep === 5"
+      :team-name="teamName"
+      :upstream-configured="upstreamConfigured"
+      :upstream-provider="upstreamProvider"
+      @continue="currentStep = 6"
+      @finish="goToDashboard"
+    />
+
+    <UpstreamConfigPanel
+      v-if="currentStep === 6"
+      :api-base="apiBase"
+      :api-key="createdKeyValue"
+      :team-id="createdTeamId"
+      @back="currentStep = 5"
+      @complete="completeUpstreamSetup"
+      @skip="skipUpstreamSetup"
+    />
+
+  </div>
+</template>

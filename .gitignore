@@ -1,0 +1,26 @@
+# Build outputs
+*.exe
+
+# Runtime logs
+*.log
+
+# Health-check scratch
+health-response.txt
+
+# Local environment (keep .env.example tracked)
+.env
+
+# Agent runtime scratch — never index these.
+# The npm cache stores content-addressed sha512 paths that exceed the Windows
+# 260-char limit, which makes `git add` fail with "Filename too long" and
+# aborts the whole run (ALL-155 run 01a03859).
+.npm-cache-multica/
+.agent_context/
+.multica/
+.claude/
+.codebuddy/
+.all199/
+
+# Coverage artifacts
+coverage.out
+*_coverage.out

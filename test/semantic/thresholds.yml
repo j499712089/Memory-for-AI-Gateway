@@ -1,0 +1,66 @@
+# Semantic Similarity Threshold Calibration
+#
+# This file defines language-specific thresholds for semantic validity assertions.
+# These thresholds are used by ALL-155 acceptance tests to verify that the
+# embedding implementation produces semantically meaningful vectors.
+#
+# Calibration methodology:
+# 1. Prepare probe text pairs: synonymous pairs (same meaning, different wording)
+#    and unrelated pairs (completely different topics)
+# 2. Encode each text using the production embedding service
+# 3. Compute cosine similarity for all pairs
+# 4. Set thresholds based on observed distribution with safety margins
+#
+# Last calibrated: 2026-08-24
+# Model: F:\AI\models\paraphrase-multilingual-MiniLM-L12-v2\model_quantized.onnx
+# Dimensions: 384
+
+version: 1
+
+thresholds:
+  # English thresholds - calibrated against the approved multilingual model
+  en:
+    synonym_min: 0.79     # Min observed 0.8393, margin -0.05
+    unrelated_max: 0.10   # Max observed 0.0491, margin +0.05
+    separation_min: 0.15  # Minimum separation: min(synonym) - max(unrelated)
+
+    # Observed distribution (2026-08-24, paraphrase-multilingual-MiniLM-L12-v2):
+    # - Synonymous pairs: 0.8946 / 0.8393 / 0.8980 / 0.9275
+    # - Unrelated pairs: -0.0313 / 0.0181 / 0.0491 / -0.0156
+    # - Actual separation: 0.7902
+
+  # Chinese thresholds - calibrated against the approved multilingual model
+  zh:
+    synonym_min: 0.71     # Min observed 0.7594, margin -0.05
+    unrelated_max: 0.14   # Max observed 0.0894, margin +0.05
+    separation_min: 0.15  # Relative separation (model-independent)
+
+    # Observed distribution (2026-08-24, paraphrase-multilingual-MiniLM-L12-v2):
+    # - Synonymous pairs: 0.7594 / 0.8790 / 0.9580 / 0.8712
+    # - Unrelated pairs: 0.0894 / -0.0125 / 0.0160 / 0.0578
+    # - Actual separation: 0.6700
+
+# Calibration metadata
+calibration:
+  model_path: "F:\\AI\\models\\paraphrase-multilingual-MiniLM-L12-v2\\model_quantized.onnx"
+  model_size_bytes: 118308126
+  model_sha256: "66FC00F5F29AFCAFF34092E1BDD20008CA3918265A82FB9695A551E510CC4EBC"
+  tokenizer_path: "F:\\AI\\models\\paraphrase-multilingual-MiniLM-L12-v2\\tokenizer.json"
+  tokenizer_sha256: "B60B6B43406A48BF3638526314F3D232D97058BC93472FF2DE930D43686FA441"
+  onnxruntime_path: "F:\\AI\\models\\paraphrase-multilingual-MiniLM-L12-v2\\onnxruntime.dll"
+  calibration_date: "2026-08-24"
+  calibrator: "ALL-195"
+
+  # When to recalibrate:
+  # - Model file changes (different sha256)
+  # - Tokenizer changes
+  # - Embedding normalization logic changes
+  # - Observed semantic search quality degrades
+
+# Usage notes:
+#
+# 1. ALL-155 acceptance tests MUST read thresholds from this file
+# 2. Tests MUST verify both absolute thresholds AND relative separation
+# 3. Hash-based placeholder implementations will fail synonym_min check
+# 4. DO NOT hardcode thresholds in test code - always reference this file
+# 5. Thresholds are calibrated for paraphrase-multilingual-MiniLM-L12-v2

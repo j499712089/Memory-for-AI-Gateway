@@ -1,0 +1,32 @@
+{
+  "name": "memory-gateway-web-panel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Memory Gateway MVP — Web 管理面板 (团队/身份卡/API Key/上游通道/健康看板)",
+  "scripts": {
+    "dev": "vite",
+    "lint": "node scripts/check-no-emoji.mjs",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "pinia": "^4.0.3",
+    "vue": "^3.5.41",
+    "vue-router": "^5.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/test-utils": "^2.4.11",
+    "jsdom": "^30.0.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.10"
+  }
+}
