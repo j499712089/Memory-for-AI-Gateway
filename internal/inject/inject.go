@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"gateway/internal/adapter"
+	"gateway/internal/embedding"
 	"gateway/internal/paths"
 	"gateway/internal/retrieval"
 )
@@ -27,6 +28,11 @@ type Request struct {
 	Query          string
 	TokenBudget    int
 	Limit          int
+	// EmbeddingService is the optional semantic encoder shared with the MCP
+	// retrieval path (ALL-233). A nil service keeps the FTS-only degradation:
+	// retrieval.SearchWithEmbedding degrades inside SearchHybrid exactly like
+	// an unconfigured embedding pipeline.
+	EmbeddingService *embedding.Service
 }
 
 // Build assembles a protocol-neutral injection package from the approved path
@@ -46,7 +52,7 @@ func Build(ctx context.Context, request Request) (adapter.InjectionPackage, stri
 	if err != nil {
 		return adapter.InjectionPackage{}, "", err
 	}
-	result, err := retrieval.Search(ctx, request.TeamDB, retrieval.Request{
+	result, err := retrieval.SearchWithEmbedding(ctx, request.TeamDB, request.EmbeddingService, retrieval.Request{
 		TeamID: request.TeamID, AgentID: request.AgentID, UserID: request.UserID, Role: request.Role,
 		IdentityCardID: request.IdentityCardID, Query: request.Query, Limit: request.Limit, TokenBudget: request.TokenBudget,
 	})

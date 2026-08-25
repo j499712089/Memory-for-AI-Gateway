@@ -17,6 +17,7 @@ import (
 	"gateway/internal/adapter"
 	"gateway/internal/binding"
 	"gateway/internal/db"
+	"gateway/internal/embedding"
 	"gateway/internal/hashutil"
 	"gateway/internal/idgen"
 	"gateway/internal/inject"
@@ -62,6 +63,10 @@ type GatewayHandler struct {
 	teamsDir       string
 	tokenBudget    int
 	refineQueue    *worker.Queue
+	// embeddingService is the semantic encoder shared with the MCP retrieval
+	// path (ALL-233). It is nil when the model failed to load at startup; the
+	// injection chain then degrades to FTS-only retrieval.
+	embeddingService *embedding.Service
 
 	// sqliteWriteProbe and bufferWriteProbe are test seams for the recording
 	// degradation gate. nil means the sink is considered writable; returning a
@@ -70,22 +75,29 @@ type GatewayHandler struct {
 	bufferWriteProbe func() error
 }
 
-// NewGatewayHandler creates a new gateway handler.
-func NewGatewayHandler(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string) *GatewayHandler {
+// NewGatewayHandler creates a new gateway handler. An optional embedding
+// service wires semantic retrieval into the LLM injection chain (ALL-233);
+// omitting it keeps the FTS-only degradation.
+func NewGatewayHandler(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string, services ...*embedding.Service) *GatewayHandler {
 	tokenBudget := defaultInjectionTokenBudget
 	if raw := os.Getenv("MEMORY_TOKEN_BUDGET"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			tokenBudget = n
 		}
 	}
+	var embeddingService *embedding.Service
+	if len(services) > 0 {
+		embeddingService = services[0]
+	}
 	return &GatewayHandler{
-		db:             db,
-		secretsManager: secretsManager,
-		memoryRoot:     memoryRoot,
-		upstreamClient: adapter.NewUpstreamClient(120 * time.Second),
-		teamsDir:       paths.TeamsDir(memoryRoot),
-		tokenBudget:    tokenBudget,
-		refineQueue:    worker.NewQueue(db, 30*time.Second),
+		db:               db,
+		secretsManager:   secretsManager,
+		memoryRoot:       memoryRoot,
+		upstreamClient:   adapter.NewUpstreamClient(120 * time.Second),
+		teamsDir:         paths.TeamsDir(memoryRoot),
+		tokenBudget:      tokenBudget,
+		refineQueue:      worker.NewQueue(db, 30*time.Second),
+		embeddingService: embeddingService,
 	}
 }
 
@@ -880,15 +892,16 @@ func (h *GatewayHandler) buildLLMInjection(ctx context.Context, teamID, agentID,
 		return adapter.InjectionPackage{}, "", fmt.Errorf("ensure team asset schema: %w", err)
 	}
 	pkg, text, err := inject.Build(ctx, inject.Request{
-		GlobalDB:       h.db,
-		TeamDB:         teamDB,
-		MemoryRoot:     h.memoryRoot,
-		TeamID:         teamID,
-		AgentID:        agentID,
-		IdentityCardID: identityCardID,
-		Query:          extractInjectionQuery(inbound),
-		TokenBudget:    tokenBudget,
-		Limit:          defaultInjectionLimit,
+		GlobalDB:         h.db,
+		TeamDB:           teamDB,
+		MemoryRoot:       h.memoryRoot,
+		TeamID:           teamID,
+		AgentID:          agentID,
+		IdentityCardID:   identityCardID,
+		Query:            extractInjectionQuery(inbound),
+		TokenBudget:      tokenBudget,
+		Limit:            defaultInjectionLimit,
+		EmbeddingService: h.embeddingService,
 	})
 	if err != nil {
 		return adapter.InjectionPackage{}, "", err

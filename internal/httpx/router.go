@@ -18,7 +18,7 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string,
 	// Create handlers
 	healthHandler := NewHealthHandler(db)
 	adminHandler := NewAdminHandler(db, secretsManager)
-	gatewayHandler := NewGatewayHandler(db, secretsManager, memoryRoot)
+	gatewayHandler := NewGatewayHandler(db, secretsManager, memoryRoot, services...)
 	mcpHandler := NewMCPHandler(db, memoryRoot, services...)
 	systemHandler := NewSystemHandler(db)
 	identityHandler := NewIdentityHandler(db)
