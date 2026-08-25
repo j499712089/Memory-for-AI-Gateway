@@ -1,6 +1,9 @@
 # Build outputs
 *.exe
 
+# Node dependencies (web-panel build artifacts — not part of the repo per ALL-243)
+node_modules/
+
 # Runtime logs
 *.log
 
