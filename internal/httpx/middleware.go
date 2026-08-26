@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -92,6 +93,51 @@ func GetAPIKeyID(c *gin.Context) (string, bool) {
 		return "", false
 	}
 	return apiKeyID.(string), true
+}
+
+// requireScope is a route middleware asserting the authenticated API key's
+// scopes include the named scope. It must run behind AuthMiddleware. The
+// admin scope uses the flat admin error shape (no request_id), matching the
+// admin/system/identity handlers; other scopes reuse the request_id-bearing
+// errorResponse used by the MCP and gateway handlers.
+func requireScope(database *sql.DB, scope string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKeyID, ok := GetAPIKeyID(c)
+		if !ok {
+			writeScopeError(c, scope, http.StatusUnauthorized, "unauthorized", "missing api key context")
+			c.Abort()
+			return
+		}
+		var scopesJSON string
+		err := database.QueryRowContext(c.Request.Context(), `SELECT scopes FROM api_keys WHERE id = ?`, apiKeyID).Scan(&scopesJSON)
+		if err != nil {
+			writeScopeError(c, scope, http.StatusUnauthorized, "unauthorized", "api key not found")
+			c.Abort()
+			return
+		}
+		var scopes []string
+		if json.Unmarshal([]byte(scopesJSON), &scopes) != nil {
+			writeScopeError(c, scope, http.StatusForbidden, "forbidden", "api key scopes unreadable")
+			c.Abort()
+			return
+		}
+		for _, s := range scopes {
+			if s == scope {
+				c.Next()
+				return
+			}
+		}
+		writeScopeError(c, scope, http.StatusForbidden, "forbidden", "api key scopes do not include '"+scope+"'")
+		c.Abort()
+	}
+}
+
+func writeScopeError(c *gin.Context, scope string, status int, errType, message string) {
+	if scope == "admin" {
+		c.JSON(status, gin.H{"error": gin.H{"type": errType, "message": message}})
+		return
+	}
+	errorResponse(c, status, errType, message)
 }
 
 // IdempotencyMiddleware extracts the HTTP idempotency key and removes expired

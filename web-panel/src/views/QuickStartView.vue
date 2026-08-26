@@ -19,7 +19,7 @@ const teamName = ref('')
 const teamSlug = ref('')
 const teamDescription = ref('')
 const keyName = ref('')
-const keyScopes = ref(['memories:read', 'memories:write'])
+const keyScopes = ref(['gateway', 'mcp'])
 const cardName = ref('')
 const cardPersona = ref('')
 const agentId = ref('')
@@ -178,12 +178,16 @@ onMounted(async () => {
           <label class="block text-sm font-medium text-gray-700">权限范围</label>
           <div class="mt-2 space-y-2">
             <label class="flex items-center">
-              <input v-model="keyScopes" type="checkbox" value="memories:read" class="mr-2" />
-              <span class="text-sm">memories:read（读取记忆）</span>
+              <input v-model="keyScopes" type="checkbox" value="gateway" class="mr-2" />
+              <span class="text-sm">gateway（LLM 网关代理）</span>
             </label>
             <label class="flex items-center">
-              <input v-model="keyScopes" type="checkbox" value="memories:write" class="mr-2" />
-              <span class="text-sm">memories:write（写入记忆）</span>
+              <input v-model="keyScopes" type="checkbox" value="mcp" class="mr-2" />
+              <span class="text-sm">mcp（MCP 内部 API）</span>
+            </label>
+            <label class="flex items-center">
+              <input v-model="keyScopes" type="checkbox" value="admin" class="mr-2" />
+              <span class="text-sm">admin（管理 API）</span>
             </label>
           </div>
         </div>

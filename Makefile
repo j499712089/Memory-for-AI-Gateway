@@ -1,4 +1,17 @@
-.PHONY: build worker run run-all run-worker test clean
+.PHONY: build worker run run-all run-worker test test-coverage clean deps migrate health docs-assets
+
+# docs-assets refreshes the vendored Swagger UI assets under docs/swagger-ui/
+# (pinned swagger-ui-dist@5.19.0). The OpenAPI spec and these assets are
+# embedded into the binary via go:embed, so the docs directory is never
+# required at runtime and no external CDN is used (ALL-272).
+docs-assets:
+	npm pack swagger-ui-dist@5.19.0
+	tar -xzf swagger-ui-dist-5.19.0.tgz -C docs/swagger-ui --strip-components=1 \
+		package/swagger-ui-bundle.js package/swagger-ui.css \
+		package/swagger-ui-standalone-preset.js \
+		package/swagger-ui-bundle.js.map package/swagger-ui.css.map \
+		package/favicon-16x16.png package/favicon-32x32.png
+	rm -f swagger-ui-dist-5.19.0.tgz
 
 build:
 	go build -o gateway.exe cmd/gateway/main.go

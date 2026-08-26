@@ -2,6 +2,8 @@ package httpx
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -239,8 +241,35 @@ func (h *AdminHandler) HandleCreateAPIKey(c *gin.Context) {
 		return
 	}
 
-	// Default scopes
-	scopes := `["gateway","mcp"]`
+	// Persist the requested scopes. When omitted, fall back to the documented
+	// default. Scopes are validated against the declared set so a caller can
+	// never mint an undeclared scope (ALL-272).
+	scopes := req.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{"gateway", "mcp"}
+	}
+	for _, s := range scopes {
+		if s != "gateway" && s != "mcp" && s != "admin" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{
+					"type":    "invalid_request",
+					"message": fmt.Sprintf("unknown scope %q (allowed: gateway, mcp, admin)", s),
+				},
+			})
+			return
+		}
+	}
+	scopesJSON, err := json.Marshal(scopes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{
+				"type":    "internal_error",
+				"message": "failed to serialize scopes",
+			},
+		})
+		return
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Insert API key
@@ -248,7 +277,7 @@ func (h *AdminHandler) HandleCreateAPIKey(c *gin.Context) {
 		INSERT INTO api_keys (id, team_id, key_hash, key_ref, scopes, enabled, created_at)
 		VALUES (?, ?, ?, ?, ?, 1, ?)
 	`
-	_, err = h.db.Exec(query, keyID, req.TeamID, keyHash, keyRef, scopes, now)
+	_, err = h.db.Exec(query, keyID, req.TeamID, keyHash, keyRef, string(scopesJSON), now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
@@ -265,7 +294,7 @@ func (h *AdminHandler) HandleCreateAPIKey(c *gin.Context) {
 		TeamID:    req.TeamID,
 		Key:       plaintextKey,
 		KeyHash:   keyHash[:8],
-		Scopes:    scopes,
+		Scopes:    string(scopesJSON),
 		Enabled:   true,
 		CreatedAt: now,
 	}

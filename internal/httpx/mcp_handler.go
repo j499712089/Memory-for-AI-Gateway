@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -130,35 +129,7 @@ func (h *MCPHandler) openTeamDB(teamID string) (*sql.DB, error) {
 // requireMCPScope is a route middleware asserting the authenticated API key's
 // scopes include "mcp". It must run behind AuthMiddleware.
 func requireMCPScope(database *sql.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		apiKeyID, ok := GetAPIKeyID(c)
-		if !ok {
-			errorResponse(c, http.StatusUnauthorized, "unauthorized", "missing api key context")
-			c.Abort()
-			return
-		}
-		var scopesJSON string
-		err := database.QueryRowContext(c.Request.Context(), `SELECT scopes FROM api_keys WHERE id = ?`, apiKeyID).Scan(&scopesJSON)
-		if err != nil {
-			errorResponse(c, http.StatusUnauthorized, "unauthorized", "api key not found")
-			c.Abort()
-			return
-		}
-		var scopes []string
-		if json.Unmarshal([]byte(scopesJSON), &scopes) != nil {
-			errorResponse(c, http.StatusForbidden, "forbidden", "api key scopes unreadable")
-			c.Abort()
-			return
-		}
-		for _, scope := range scopes {
-			if scope == "mcp" {
-				c.Next()
-				return
-			}
-		}
-		errorResponse(c, http.StatusForbidden, "forbidden", "api key scopes do not include 'mcp'")
-		c.Abort()
-	}
+	return requireScope(database, "mcp")
 }
 
 // ---------------------------------------------------------------------------

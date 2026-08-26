@@ -72,7 +72,7 @@ function onSubmit() {
     <div>
       <span class="mb-1 block text-sm font-medium text-gray-700">Scopes</span>
       <div class="flex gap-4">
-        <label v-for="s in ['gateway', 'mcp']" :key="s" class="flex items-center gap-2 text-sm">
+        <label v-for="s in ['gateway', 'mcp', 'admin']" :key="s" class="flex items-center gap-2 text-sm">
           <input type="checkbox" :checked="form.scopes.includes(s)" @change="toggleScope(s)" />
           {{ s }}
         </label>

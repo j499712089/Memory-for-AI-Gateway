@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Memory Gateway API 文档</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+  <link rel="stylesheet" href="swagger-ui.css" />
   <style>
     body { margin: 0; }
     .topbar { display: none; }
@@ -12,14 +13,15 @@
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+  <script src="swagger-ui-bundle.js" charset="UTF-8"></script>
+  <script src="swagger-ui-standalone-preset.js" charset="UTF-8"></script>
   <script>
     window.onload = function () {
       window.ui = SwaggerUIBundle({
         url: "../openapi.yaml",
         dom_id: "#swagger-ui",
         deepLinking: true,
-        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
         layout: "StandaloneLayout",
       });
     };

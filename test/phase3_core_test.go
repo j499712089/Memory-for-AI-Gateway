@@ -333,7 +333,7 @@ func TestRecordingHealthEndpointListsFilteredRows(t *testing.T) {
 	if _, err := database.Global.Exec(`INSERT INTO teams (id, name, slug) VALUES ('team-1', 'Team 1', 'team-1')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Global.Exec(`INSERT INTO api_keys (id, team_id, key_hash, key_ref) VALUES ('api-key', 'team-1', ?, 'ref')`, hashutil.SHA256("gateway-key")); err != nil {
+	if _, err := database.Global.Exec(`INSERT INTO api_keys (id, team_id, key_hash, key_ref, scopes) VALUES ('api-key', 'team-1', ?, 'ref', '["admin","gateway","mcp"]')`, hashutil.SHA256("gateway-key")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.Global.Exec(`INSERT INTO sessions (id, team_id, kind, conversation_id) VALUES ('session-1', 'team-1', 'main', 'conversation-1')`); err != nil {
@@ -372,7 +372,7 @@ func TestRecordingHealthProjectsCompletedLedgerRows(t *testing.T) {
 	if _, err := database.Global.Exec(`INSERT INTO teams (id, name, slug) VALUES ('team-1', 'Team 1', 'team-1')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.Global.Exec(`INSERT INTO api_keys (id, team_id, key_hash, key_ref) VALUES ('api-key', 'team-1', ?, 'ref')`, hashutil.SHA256("gateway-key")); err != nil {
+	if _, err := database.Global.Exec(`INSERT INTO api_keys (id, team_id, key_hash, key_ref, scopes) VALUES ('api-key', 'team-1', ?, 'ref', '["admin","gateway","mcp"]')`, hashutil.SHA256("gateway-key")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.Global.Exec(`INSERT INTO sessions (id, team_id, kind, conversation_id, binding_version) VALUES ('session-1', 'team-1', 'main', 'conversation-1', 2)`); err != nil {

@@ -89,6 +89,7 @@ paths:
       operationId: listTeams
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 团队列表（排除 archived）
@@ -107,6 +108,8 @@ paths:
                     example: 2
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
     post:
@@ -115,6 +118,7 @@ paths:
       operationId: createTeam
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -132,12 +136,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: slug 已存在
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/AdminError"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -148,6 +154,7 @@ paths:
       operationId: getTeam
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/TeamID"
       responses:
@@ -159,6 +166,8 @@ paths:
                 $ref: "#/components/schemas/Team"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -171,6 +180,7 @@ paths:
       operationId: listAPIKeys
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - name: team_id
           in: query
@@ -196,6 +206,8 @@ paths:
                     example: 3
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
     post:
@@ -205,6 +217,7 @@ paths:
       description: 明文 Key 仅在创建时返回一次，请妥善保存。默认 scopes 为 `["gateway","mcp"]`。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -222,6 +235,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -233,6 +248,7 @@ paths:
       description: 返回按 request 维度投影的录入状态，供 Web 面板使用。行数据按认证团队作用域隔离。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - name: limit
           in: query
@@ -285,6 +301,8 @@ paths:
                     example: 0
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -295,6 +313,7 @@ paths:
       operationId: startService
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 启动指令已受理
@@ -308,12 +327,14 @@ paths:
                     example: service start initiated
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: 服务已在运行
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/AdminError"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -325,6 +346,7 @@ paths:
       description: 返回成功后约 1 秒进程退出。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 停止指令已受理
@@ -338,6 +360,8 @@ paths:
                     example: service stop initiated
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/system/service/restart:
     post:
@@ -347,6 +371,7 @@ paths:
       description: 返回成功后先拉起新实例再退出当前实例。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 重启指令已受理
@@ -360,6 +385,8 @@ paths:
                     example: service restart initiated
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/system/service/status:
     get:
@@ -368,6 +395,7 @@ paths:
       operationId: getServiceStatus
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 服务状态
@@ -377,6 +405,8 @@ paths:
                 $ref: "#/components/schemas/ServiceStatusResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/system/autostart:
     put:
@@ -386,6 +416,7 @@ paths:
       description: 仅 Windows 实现（Task Scheduler）；其他平台返回 501。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -415,6 +446,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
         "501":
@@ -422,7 +455,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/AdminError"
 
   /api/system/logs:
     get:
@@ -431,6 +464,7 @@ paths:
       operationId: getSystemLogs
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - name: limit
           in: query
@@ -450,6 +484,8 @@ paths:
                   $ref: "#/components/schemas/LogEntry"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -461,6 +497,7 @@ paths:
       description: 响应带 `Content-Disposition` 附件头，返回 JSON 配置。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 配置备份（JSON）
@@ -479,6 +516,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/system/restore:
     post:
@@ -487,6 +526,7 @@ paths:
       operationId: restoreConfig
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -513,6 +553,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/system/config:
     get:
@@ -521,6 +563,7 @@ paths:
       operationId: getSystemConfig
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       responses:
         "200":
           description: 系统配置
@@ -530,6 +573,8 @@ paths:
                 $ref: "#/components/schemas/SystemConfigResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/identity-cards/{id}/bind-agent:
     post:
@@ -538,6 +583,7 @@ paths:
       operationId: bindAgent
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/IdentityCardID"
       requestBody:
@@ -562,6 +608,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -574,6 +622,7 @@ paths:
       operationId: testAgentConnection
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/IdentityCardID"
       requestBody:
@@ -597,9 +646,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/AdminError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -617,6 +668,7 @@ paths:
       description: 在团队记忆库中检索与 query 最相关的资产（FTS + 语义向量融合）。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -655,6 +707,7 @@ paths:
       operationId: mcpMemoryGet
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -687,6 +740,7 @@ paths:
       description: 经 SQLite 事务层写入 L1 资产。相同内容去重（内容哈希 slug），重复追加返回 409。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -711,7 +765,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/MCPError"
         "500":
           $ref: "#/components/responses/MCPInternalError"
 
@@ -723,6 +777,7 @@ paths:
       description: FTS5 优先，失败或未命中时回退 LIKE 扫描。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -759,6 +814,7 @@ paths:
       description: 查找符号/文件并沿调用方向遍历，返回受影响的调用方/被调方与文件列表。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -791,6 +847,7 @@ paths:
       description: 按名称/显示名/触发边界子串匹配，可选状态与版本过滤。steps_summary 最多返回 3 步。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -827,6 +884,7 @@ paths:
       description: 按 conversation_id 或 session_id 查询会话绑定（team/agent/identity card）。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -858,6 +916,7 @@ paths:
       operationId: mcpAssetsList
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       requestBody:
         required: true
         content:
@@ -904,6 +963,7 @@ paths:
         不重复调用上游。不同请求体复用同一 Key 返回 409。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
         - $ref: "#/components/parameters/ConversationID"
@@ -937,6 +997,8 @@ paths:
           $ref: "#/components/responses/GatewayError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/GatewayForbidden"
         "404":
           $ref: "#/components/responses/GatewayNotFound"
         "409":
@@ -954,6 +1016,7 @@ paths:
       description: 与 `POST /v1/messages` 相同，通过路径参数指定上游通道名。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/Channel"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -986,6 +1049,8 @@ paths:
           $ref: "#/components/responses/GatewayError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/GatewayForbidden"
         "404":
           $ref: "#/components/responses/GatewayNotFound"
         "409":
@@ -1003,6 +1068,7 @@ paths:
       description: 请求/响应结构与 OpenAI Chat Completions API 一致（透传），支持流式响应。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/Channel"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1035,6 +1101,8 @@ paths:
           $ref: "#/components/responses/GatewayError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/GatewayForbidden"
         "404":
           $ref: "#/components/responses/GatewayNotFound"
         "409":
@@ -1052,6 +1120,7 @@ paths:
       description: 与 `/codebuddy/{channel}/v1/chat/completions` 相同，仅路径前缀不同（DSH 运行时使用）。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/Channel"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1084,6 +1153,8 @@ paths:
           $ref: "#/components/responses/GatewayError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/GatewayForbidden"
         "404":
           $ref: "#/components/responses/GatewayNotFound"
         "409":
@@ -1104,6 +1175,7 @@ paths:
         幂等性：除 `Idempotency-Key` 请求头外，也接受请求体中的 `idempotency_key` 字段。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/Channel"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1136,6 +1208,8 @@ paths:
           $ref: "#/components/responses/GatewayError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/GatewayForbidden"
         "404":
           $ref: "#/components/responses/GatewayNotFound"
         "409":
@@ -1153,6 +1227,7 @@ paths:
       description: 与 `POST /codex/{channel}/v1/responses` 相同，兼容无 `/v1` 前缀的 Codex Runtime 调用。
       security:
         - bearerAuth: []
+        - apiKeyHeader: []
       parameters:
         - $ref: "#/components/parameters/Channel"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1185,6 +1260,8 @@ paths:
           $ref: "#/components/responses/GatewayError"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/GatewayForbidden"
         "404":
           $ref: "#/components/responses/GatewayNotFound"
         "409":
@@ -1200,6 +1277,11 @@ components:
       type: http
       scheme: bearer
       description: "`Authorization: Bearer <api_key>`。API Key 形如 `gw_...`，通过 `POST /api/api-keys` 创建。"
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: "`x-api-key: <api_key>`。与 `Authorization: Bearer <api_key>` 等价的替代认证方式，值同为 API Key。"
 
   parameters:
     TeamID:
@@ -1250,25 +1332,31 @@ components:
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/AdminError"
     Unauthorized:
       description: 认证失败（缺少或无效的 API Key）
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/AuthError"
+    Forbidden:
+      description: 权限不足（API Key 缺少所需 scope）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AdminError"
     NotFound:
       description: 资源不存在
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/AdminError"
     InternalError:
       description: 服务器内部错误
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/AdminError"
     MCPBadRequest:
       description: 参数错误（含 request_id）
       content:
@@ -1299,6 +1387,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/GatewayError"
+    GatewayForbidden:
+      description: 权限不足（API Key 缺少所需 scope）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
     GatewayNotFound:
       description: 上游通道不存在
       content:
@@ -1325,22 +1419,23 @@ components:
             $ref: "#/components/schemas/GatewayError"
 
   schemas:
-    Error:
+    AdminError:
       type: object
-      required: [type, message]
+      required: [error]
+      description: 管理 API 统一错误结构（与 admin/system/identity handler 实际返回一致）
       properties:
-        type:
-          type: string
-          description: 错误类型（invalid_request / not_found / conflict / internal_error / ...）
-          example: not_found
-        message:
-          type: string
-          description: 人类可读错误描述（纯文本）
-          example: team not found
-        request_id:
-          type: string
-          description: 请求 ID（部分端点提供，用于排查问题）
-          example: req_xyz789
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+              description: 错误类型（invalid_request / not_found / conflict / internal_error / ...）
+              example: not_found
+            message:
+              type: string
+              description: 人类可读错误描述（纯文本）
+              example: team not found
     AuthError:
       type: object
       required: [error]
@@ -1383,7 +1478,7 @@ components:
           properties:
             type:
               type: string
-              enum: [invalid_request, unauthorized, not_found, protocol_mismatch, idempotency_conflict, channel_disabled, recording_unavailable, recording_error, configuration_error, upstream_error, internal_error]
+              enum: [invalid_request, unauthorized, forbidden, not_found, protocol_mismatch, idempotency_conflict, channel_disabled, recording_unavailable, recording_error, configuration_error, upstream_error, internal_error]
               example: not_found
             message:
               type: string

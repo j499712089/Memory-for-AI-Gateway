@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"database/sql"
+	"net/http"
 
 	"gateway/internal/auth"
 	"gateway/internal/embedding"
@@ -29,38 +30,64 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string,
 	// Health endpoint (no auth required)
 	r.GET("/health", healthHandler.HandleHealth)
 
-	// API documentation (OpenAPI spec + Swagger UI), served from the docs
-	// directory. Access Swagger UI at /docs/swagger-ui/.
-	r.Static("/docs", "./docs")
+	// API documentation (OpenAPI spec + Swagger UI). Only the OpenAPI spec and
+	// the self-contained Swagger UI assets are served from the embedded docs
+	// package; the rest of the docs directory (architecture, database schema,
+	// deployment guides) is not exposed (ALL-272). Access Swagger UI at
+	// /docs/swagger-ui/.
+	docsGroup := r.Group("/docs")
+	{
+		docsGroup.GET("/openapi.yaml", serveDocFile("openapi.yaml"))
+		docsGroup.GET("/swagger-ui/", serveDocFile("swagger-ui/index.html"))
+		docsGroup.GET("/swagger-ui", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/docs/swagger-ui/") })
+		for _, asset := range []string{
+			"swagger-ui/index.html",
+			"swagger-ui/swagger-ui.css",
+			"swagger-ui/swagger-ui-bundle.js",
+			"swagger-ui/swagger-ui-standalone-preset.js",
+			"swagger-ui/swagger-ui-bundle.js.map",
+			"swagger-ui/swagger-ui.css.map",
+			"swagger-ui/favicon-16x16.png",
+			"swagger-ui/favicon-32x32.png",
+		} {
+			docsGroup.GET("/"+asset, serveDocFile(asset))
+		}
+	}
 
 	// API group (requires auth)
 	api := r.Group("/api")
 	api.Use(AuthMiddleware(authMgr))
 	{
-		// Teams
-		api.GET("/teams", adminHandler.HandleListTeams)
-		api.POST("/teams", adminHandler.HandleCreateTeam)
-		api.GET("/teams/:team_id", adminHandler.HandleGetTeam)
+		// Admin-scoped management routes. Scope check runs behind
+		// AuthMiddleware and rejects keys lacking the "admin" scope (ALL-272).
+		admin := api.Group("")
+		admin.Use(requireScope(db, "admin"))
+		{
+			// Teams
+			admin.GET("/teams", adminHandler.HandleListTeams)
+			admin.POST("/teams", adminHandler.HandleCreateTeam)
+			admin.GET("/teams/:team_id", adminHandler.HandleGetTeam)
 
-		// API Keys
-		api.GET("/api-keys", adminHandler.HandleListAPIKeys)
-		api.POST("/api-keys", adminHandler.HandleCreateAPIKey)
-		api.GET("/recording-health", healthHandler.HandleRecordingHealth)
+			// API Keys
+			admin.GET("/api-keys", adminHandler.HandleListAPIKeys)
+			admin.POST("/api-keys", adminHandler.HandleCreateAPIKey)
+			admin.GET("/recording-health", healthHandler.HandleRecordingHealth)
 
-		// System Management
-		api.POST("/system/service/start", systemHandler.HandleServiceStart)
-		api.POST("/system/service/stop", systemHandler.HandleServiceStop)
-		api.POST("/system/service/restart", systemHandler.HandleServiceRestart)
-		api.GET("/system/service/status", systemHandler.HandleServiceStatus)
-		api.PUT("/system/autostart", systemHandler.HandleSetAutostart)
-		api.GET("/system/logs", systemHandler.HandleGetLogs)
-		api.POST("/system/backup", systemHandler.HandleBackup)
-		api.POST("/system/restore", systemHandler.HandleRestore)
-		api.GET("/system/config", systemHandler.HandleGetConfig)
+			// System Management
+			admin.POST("/system/service/start", systemHandler.HandleServiceStart)
+			admin.POST("/system/service/stop", systemHandler.HandleServiceStop)
+			admin.POST("/system/service/restart", systemHandler.HandleServiceRestart)
+			admin.GET("/system/service/status", systemHandler.HandleServiceStatus)
+			admin.PUT("/system/autostart", systemHandler.HandleSetAutostart)
+			admin.GET("/system/logs", systemHandler.HandleGetLogs)
+			admin.POST("/system/backup", systemHandler.HandleBackup)
+			admin.POST("/system/restore", systemHandler.HandleRestore)
+			admin.GET("/system/config", systemHandler.HandleGetConfig)
 
-		// Identity Cards - Agent Binding
-		api.POST("/identity-cards/:id/bind-agent", identityHandler.HandleBindAgent)
-		api.POST("/identity-cards/:id/test-connection", identityHandler.HandleTestConnection)
+			// Identity Cards - Agent Binding
+			admin.POST("/identity-cards/:id/bind-agent", identityHandler.HandleBindAgent)
+			admin.POST("/identity-cards/:id/test-connection", identityHandler.HandleTestConnection)
+		}
 
 		// MCP internal service API (consumed by the MCP Server :8097).
 		// Auth inherited from the /api group; scope check is route-local.
@@ -78,9 +105,10 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string,
 		}
 	}
 
-	// Gateway LLM endpoints (requires auth + idempotency)
+	// Gateway LLM endpoints (requires auth + gateway scope + idempotency)
 	gateway := r.Group("")
 	gateway.Use(AuthMiddleware(authMgr))
+	gateway.Use(requireScope(db, "gateway"))
 	gateway.Use(IdempotencyMiddleware(db))
 	{
 		// Anthropic Messages
