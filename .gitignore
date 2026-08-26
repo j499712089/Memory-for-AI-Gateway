@@ -23,6 +23,9 @@ health-response.txt
 .claude/
 .codebuddy/
 .all199/
+# A repo-local GOCACHE holds content-addressed build entries whose CRLF/LF
+# conversion breaks `git add` and fails the run (ALL-157 run 01a03a3e).
+.gocache/
 
 # Coverage artifacts
 coverage.out
