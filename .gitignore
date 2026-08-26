@@ -10,6 +10,9 @@ health-response.txt
 # Local environment (keep .env.example tracked)
 .env
 
+# Build caches — never index these.
+.gocache/
+
 # Agent runtime scratch — never index these.
 # The npm cache stores content-addressed sha512 paths that exceed the Windows
 # 260-char limit, which makes `git add` fail with "Filename too long" and
