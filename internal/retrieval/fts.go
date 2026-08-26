@@ -25,7 +25,8 @@ func SearchFTS(ctx context.Context, database *sql.DB, query string, limit int) (
 	}
 	likeQuery := "%" + escapeLIKE(query) + "%"
 	rows, err := database.QueryContext(ctx, `SELECT id, team_id, COALESCE(identity_card_id,''), asset_type, name, summary, source_event_ids, visibility, version, updated_at
-		FROM assets WHERE (name LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\' OR COALESCE(body_path,'') LIKE ? ESCAPE '\') ORDER BY updated_at DESC LIMIT ?`, likeQuery, likeQuery, likeQuery, limit)
+		FROM assets WHERE (name LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\' OR COALESCE(body_path,'') LIKE ? ESCAPE '\')
+		AND status NOT IN ('archived','deprecated') ORDER BY updated_at DESC LIMIT ?`, likeQuery, likeQuery, likeQuery, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search assets: %w", err)
 	}
@@ -54,9 +55,12 @@ func SearchFTS(ctx context.Context, database *sql.DB, query string, limit int) (
 		ftsRows, ftsErr := database.QueryContext(ctx, `SELECT wf.page_id, COALESCE(a.team_id,''), COALESCE(a.identity_card_id,''), COALESCE(a.visibility,''), wf.title, wf.content,
 			COALESCE(a.source_event_ids,'[]'), COALESCE(a.version,1)
 			FROM wiki_fts wf
-			LEFT JOIN wiki_pages wp ON wp.id = wf.page_id
-			LEFT JOIN assets a ON a.id = wp.asset_id
-			WHERE wiki_fts MATCH ? LIMIT ?`, escapeFTS(query), limit)
+			INNER JOIN wiki_pages wp ON wp.id = wf.page_id
+			INNER JOIN assets a ON a.id = wp.asset_id
+			WHERE wiki_fts MATCH ?
+			AND wp.status = 'ready'
+			AND a.status NOT IN ('archived','deprecated')
+			LIMIT ?`, escapeFTS(query), limit)
 		if ftsErr == nil {
 			defer ftsRows.Close()
 			for ftsRows.Next() {
@@ -128,7 +132,7 @@ func recentAssets(ctx context.Context, database *sql.DB, teamID string, limit in
 		limit = 50
 	}
 	rows, err := database.QueryContext(ctx, `SELECT id, team_id, COALESCE(identity_card_id,''), asset_type, name, summary, source_event_ids, visibility, version, updated_at
-		FROM assets WHERE team_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?`, teamID, limit)
+		FROM assets WHERE team_id = ? AND status NOT IN ('archived','deprecated') ORDER BY updated_at DESC, id DESC LIMIT ?`, teamID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list recent assets: %w", err)
 	}

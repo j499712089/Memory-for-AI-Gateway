@@ -410,7 +410,11 @@ func (h *MCPHandler) HandleWikiSearch(c *gin.Context) {
 	// FTS pass finds nothing.
 	if ftsRows, err := teamDB.QueryContext(ctx, `SELECT wp.id, wp.title, wp.slug, wp.content_md
 		FROM wiki_fts wf JOIN wiki_pages wp ON wp.id = wf.page_id
-		WHERE wiki_fts MATCH ? LIMIT ?`, escapeFTSQuery(req.Query), limit); err == nil {
+		INNER JOIN assets a ON a.id = wp.asset_id
+		WHERE wiki_fts MATCH ?
+		AND wp.status = 'ready'
+		AND a.status NOT IN ('archived','deprecated')
+		LIMIT ?`, escapeFTSQuery(req.Query), limit); err == nil {
 		for ftsRows.Next() {
 			var hit wikiHit
 			if err := ftsRows.Scan(&hit.ID, &hit.Title, &hit.Slug, &hit.Content); err == nil {
@@ -421,8 +425,12 @@ func (h *MCPHandler) HandleWikiSearch(c *gin.Context) {
 	}
 	if len(hits) == 0 {
 		like := "%" + escapeLikePattern(req.Query) + "%"
-		if likeRows, err := teamDB.QueryContext(ctx, `SELECT id, title, slug, content_md FROM wiki_pages
-			WHERE title LIKE ? ESCAPE '\' OR content_md LIKE ? ESCAPE '\' LIMIT ?`, like, like, limit); err == nil {
+		if likeRows, err := teamDB.QueryContext(ctx, `SELECT wp.id, wp.title, wp.slug, wp.content_md FROM wiki_pages wp
+			INNER JOIN assets a ON a.id = wp.asset_id
+			WHERE (wp.title LIKE ? ESCAPE '\' OR wp.content_md LIKE ? ESCAPE '\')
+			AND wp.status = 'ready'
+			AND a.status NOT IN ('archived','deprecated')
+			LIMIT ?`, like, like, limit); err == nil {
 			for likeRows.Next() {
 				var hit wikiHit
 				if err := likeRows.Scan(&hit.ID, &hit.Title, &hit.Slug, &hit.Content); err == nil {

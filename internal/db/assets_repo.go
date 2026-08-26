@@ -38,6 +38,14 @@ type AssetFilter struct {
 	Offset     int
 }
 
+// DBTX is the minimal query interface shared by *sql.DB and *sql.Tx so
+// repository helpers can run inside a caller-managed transaction.
+type DBTX interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // EnsureAssetsSchema creates the subset of the team schema needed by the
 // memory/retrieval path. It is safe to call on every startup.
 func EnsureAssetsSchema(db *sql.DB) error {
@@ -698,6 +706,60 @@ func RebuildWikiFTS(ctx context.Context, database *sql.DB) (int, error) {
 	return len(pages), nil
 }
 
+// RemoveWikiForAsset removes the wiki page, its FTS entries and its edges for
+// an asset that is being deleted, archived or deprecated. It is idempotent:
+// an asset with no wiki page is a no-op. Keeping wiki_fts in sync on the
+// write side means a removed asset can no longer surface through SearchFTS or
+// the wiki search handler. The database argument may be a *sql.Tx so callers
+// can run the cleanup inside a larger transaction.
+func RemoveWikiForAsset(ctx context.Context, database DBTX, assetID string) error {
+	if database == nil {
+		return fmt.Errorf("wiki database is nil")
+	}
+	if assetID == "" {
+		return fmt.Errorf("asset id is required")
+	}
+	rows, err := database.QueryContext(ctx, `SELECT id FROM wiki_pages WHERE asset_id = ?`, assetID)
+	if err != nil {
+		return fmt.Errorf("find wiki page for asset: %w", err)
+	}
+	var pageIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		pageIDs = append(pageIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan wiki pages: %w", err)
+	}
+	if len(pageIDs) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(pageIDs)), ",")
+	args := make([]any, 0, len(pageIDs))
+	for _, id := range pageIDs {
+		args = append(args, id)
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM wiki_fts WHERE page_id IN (`+placeholders+`)`, args...); err != nil {
+		return fmt.Errorf("remove wiki fts entries: %w", err)
+	}
+	edgeArgs := make([]any, 0, len(pageIDs)*2)
+	for _, id := range pageIDs {
+		edgeArgs = append(edgeArgs, id, id)
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM wiki_edges WHERE from_page_id IN (`+placeholders+`) OR to_page_id IN (`+placeholders+`)`, edgeArgs...); err != nil {
+		return fmt.Errorf("remove wiki edges: %w", err)
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM wiki_pages WHERE asset_id = ?`, assetID); err != nil {
+		return fmt.Errorf("remove wiki page: %w", err)
+	}
+	return nil
+}
+
 // CodeRepo mirrors the code_repos row used by the codegraph worker.
 type CodeRepo struct {
 	ID         string
@@ -1183,8 +1245,10 @@ type SkillVersion struct {
 	CreatedBy  string
 }
 
-// CreateSkillVersion records an immutable skill version row.
-func CreateSkillVersion(ctx context.Context, database *sql.DB, version SkillVersion) error {
+// CreateSkillVersion records an immutable skill version row. The database
+// argument may be a *sql.Tx so callers can run the insert inside a larger
+// transaction.
+func CreateSkillVersion(ctx context.Context, database DBTX, version SkillVersion) error {
 	sourceJSON, _ := json.Marshal(version.SourceIDs)
 	_, err := database.ExecContext(ctx, `INSERT OR IGNORE INTO skill_versions (id, skill_id, version, status, content_ref, source_ids, created_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, version.ID, version.SkillID, version.Version, version.Status, version.ContentRef,

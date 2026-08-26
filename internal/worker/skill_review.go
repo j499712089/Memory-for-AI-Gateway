@@ -194,7 +194,10 @@ func ApproveSkill(ctx context.Context, teamDB *sql.DB, teamID string, candidate 
 }
 
 // DeprecateSkill flips an approved skill to deprecated (terminal state for
-// normal lifecycle; no content mutation).
+// normal lifecycle; no content mutation). The skills status update, the asset
+// status update, the wiki cleanup and the version record run in a single
+// transaction: any step failing rolls back the rest, so a retried deprecate
+// never leaves the wiki index or the version history partially updated.
 func DeprecateSkill(ctx context.Context, teamDB *sql.DB, name string) (db.Skill, error) {
 	if teamDB == nil {
 		return db.Skill{}, fmt.Errorf("team database is nil")
@@ -206,16 +209,22 @@ func DeprecateSkill(ctx context.Context, teamDB *sql.DB, name string) (db.Skill,
 	if !skill.ValidTransition(existing.Status, "deprecated") {
 		return db.Skill{}, fmt.Errorf("invalid transition %s -> deprecated", existing.Status)
 	}
-	_, err = teamDB.ExecContext(ctx, `UPDATE skills SET status='deprecated', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`, existing.ID)
+	tx, err := teamDB.BeginTx(ctx, nil)
 	if err != nil {
+		return db.Skill{}, fmt.Errorf("begin deprecate transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE skills SET status='deprecated', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`, existing.ID); err != nil {
 		return db.Skill{}, err
 	}
 	existing.Status = "deprecated"
-	_, err = teamDB.ExecContext(ctx, `UPDATE assets SET status='deprecated', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`, existing.AssetID)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET status='deprecated', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`, existing.AssetID); err != nil {
 		return db.Skill{}, err
 	}
-	if err := db.CreateSkillVersion(ctx, teamDB, db.SkillVersion{
+	if err := db.RemoveWikiForAsset(ctx, tx, existing.AssetID); err != nil {
+		return db.Skill{}, fmt.Errorf("remove wiki page for deprecated skill: %w", err)
+	}
+	if err := db.CreateSkillVersion(ctx, tx, db.SkillVersion{
 		ID:         "sv-" + existing.ID + "-" + existing.Version + "-deprecated",
 		SkillID:    existing.ID,
 		Version:    existing.Version,
@@ -224,6 +233,9 @@ func DeprecateSkill(ctx context.Context, teamDB *sql.DB, name string) (db.Skill,
 		SourceIDs:  existing.SourceIDs,
 	}); err != nil {
 		return db.Skill{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return db.Skill{}, fmt.Errorf("commit deprecate transaction: %w", err)
 	}
 	return existing, nil
 }

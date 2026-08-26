@@ -40,7 +40,7 @@ func retrievalDB(t *testing.T) *sql.DB {
 		asset_type TEXT NOT NULL, name TEXT NOT NULL, slug TEXT NOT NULL,
 		summary TEXT NOT NULL DEFAULT '', body_path TEXT,
 		source_event_ids TEXT NOT NULL DEFAULT '[]', visibility TEXT NOT NULL DEFAULT 'team',
-		version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'ready', version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
 		embedding BLOB, embedding_model_version TEXT)`)
 	if err != nil {
 		t.Fatal(err)
