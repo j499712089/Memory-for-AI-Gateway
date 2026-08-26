@@ -12,17 +12,25 @@ import (
 	"testing"
 )
 
+// legacyTokenizerPath is the WordPiece reference fixture whose exported shape
+// TestTokenizerMatchesExportedEnglishWordPieceShape pins. It is decoupled from
+// the approved Unigram gate: EMBEDDING_LEGACY_TOKENIZER_PATH selects it, so
+// pointing EMBEDDING_TOKENIZER_PATH at the approved asset no longer skips the
+// shape check, and a missing or mismatched fixture fails non-zero instead of
+// silently passing with exit 0.
+const legacyTokenizerPath = `F:\AI\models\all-MiniLM-L6-v2\tokenizer.json`
+
 func TestTokenizerMatchesExportedEnglishWordPieceShape(t *testing.T) {
-	path := os.Getenv("EMBEDDING_TOKENIZER_PATH")
+	path := os.Getenv("EMBEDDING_LEGACY_TOKENIZER_PATH")
 	if path == "" {
-		path = `F:\AI\models\all-MiniLM-L6-v2\tokenizer.json`
+		path = legacyTokenizerPath
 	}
 	tokenizer, err := LoadTokenizer(path)
 	if err != nil {
-		t.Skipf("tokenizer unavailable: %v", err)
+		t.Fatalf("legacy WordPiece fixture unavailable: %v", err)
 	}
 	if tokenizer.kind != wordPieceKind {
-		t.Skipf("tokenizer at %s is not the legacy WordPiece fixture", path)
+		t.Fatalf("tokenizer at %s is not the legacy WordPiece fixture (kind=%d)", path, tokenizer.kind)
 	}
 	ids, mask, types, err := tokenizer.Encode("Hello, world!")
 	if err != nil {
@@ -222,7 +230,7 @@ func TestLoadTokenizerRejectsUnigramWithoutPrecompiledNormalizer(t *testing.T) {
 		t.Fatalf("parse approved tokenizer: %v", err)
 	}
 	if base.Model.Type != "Unigram" || base.Normalizer == nil || base.Normalizer.Type != "Precompiled" {
-		t.Skipf("approved tokenizer is not the Unigram/Precompiled fixture")
+		t.Fatalf("approved tokenizer is not the Unigram/Precompiled fixture (model=%q normalizer=%v)", base.Model.Type, base.Normalizer)
 	}
 	writeMutated := func(t *testing.T, mutate func(*tokenizerFile)) string {
 		t.Helper()
@@ -288,7 +296,7 @@ func TestLoadTokenizerRejectsMalformedPrecompiledCharsmap(t *testing.T) {
 		t.Fatalf("parse approved tokenizer: %v", err)
 	}
 	if base.Model.Type != "Unigram" || base.Normalizer == nil {
-		t.Skipf("approved tokenizer is not the Unigram fixture")
+		t.Fatalf("approved tokenizer is not the Unigram fixture (model=%q normalizer=%v)", base.Model.Type, base.Normalizer)
 	}
 	writeCharsmap := func(t *testing.T, trie []uint32, payload []byte) string {
 		t.Helper()
