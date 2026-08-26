@@ -58,7 +58,7 @@ func breakerFor(database *sql.DB) *vectorBreaker {
 // SearchHybrid combines lexical and semantic results using reciprocal rank
 // fusion. Vector results are fetched independently and then unioned with FTS;
 // a lexical miss can therefore still be returned by semantic retrieval.
-func SearchHybrid(ctx context.Context, database *sql.DB, query string, limit int, services ...*embedding.Service) ([]Candidate, error) {
+func SearchHybrid(ctx context.Context, database *sql.DB, query string, limit int, services ...Encoder) ([]Candidate, error) {
 	if limit <= 0 {
 		limit = 20
 	}

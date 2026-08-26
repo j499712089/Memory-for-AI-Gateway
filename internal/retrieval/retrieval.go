@@ -22,13 +22,18 @@ type Request struct {
 	Timeout        time.Duration
 }
 
-type Pipeline struct {
-	database  *sql.DB
-	embedding *embedding.Service
+type Encoder interface {
+	Encode(string) ([]float32, error)
+	ModelVersion() string
 }
 
-func NewPipeline(database *sql.DB, services ...*embedding.Service) *Pipeline {
-	var service *embedding.Service
+type Pipeline struct {
+	database  *sql.DB
+	embedding Encoder
+}
+
+func NewPipeline(database *sql.DB, services ...Encoder) *Pipeline {
+	var service Encoder
 	if len(services) > 0 {
 		service = services[0]
 	}
