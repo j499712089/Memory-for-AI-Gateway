@@ -95,5 +95,8 @@ func Search(ctx context.Context, database *sql.DB, request Request) (Result, err
 }
 
 func SearchWithEmbedding(ctx context.Context, database *sql.DB, service *embedding.Service, request Request) (Result, error) {
+	if service == nil {
+		return NewPipeline(database).Search(ctx, request)
+	}
 	return NewPipeline(database, service).Search(ctx, request)
 }
