@@ -1,0 +1,2230 @@
+openapi: 3.0.3
+info:
+  title: Memory Gateway API
+  version: 1.0.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    Memory Gateway 对外提供三类 API：
+
+    - **管理 API** (`/api/*`)：团队 / API Key / 健康看板 / 系统管理
+    - **网关 API** (`/v1/*` 及协议别名路由)：LLM 请求代理，支持 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 三种协议
+    - **MCP 内部 API** (`/api/mcp/*`)：供 MCP Server 调用的内部接口
+
+    除 `GET /health` 外，所有端点均需认证。认证方式为 `Authorization: Bearer <api_key>`，
+    或 `x-api-key: <api_key>` 请求头。API Key 通过 `POST /api/api-keys` 创建（明文仅创建时返回一次）。
+
+    MCP 端点额外要求 API Key 的 scopes 包含 `"mcp"`。
+
+    网关 LLM 端点支持幂等性保障：携带 `Idempotency-Key` 请求头时，24 小时内相同 Key + 相同请求体返回缓存的响应。
+
+servers:
+  - url: http://127.0.0.1:8096
+    description: 本地开发环境（生产环境 URL 取决于部署配置）
+
+tags:
+  - name: Health
+    description: 健康检查（无需认证）
+  - name: Teams
+    description: 团队管理
+  - name: APIKeys
+    description: API Key 管理
+  - name: RecordingHealth
+    description: 录入健康看板
+  - name: System
+    description: 系统管理（服务启停 / 自动启动 / 日志 / 配置备份恢复）
+  - name: IdentityCards
+    description: 身份卡 Agent 绑定
+  - name: MCP
+    description: MCP 内部 API（需 mcp scope）
+  - name: Gateway
+    description: LLM 代理端点（需 gateway scope）
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: 获取服务健康状态
+      operationId: getHealth
+      description: 无需认证。检查数据库连通性与 journal mode。
+      security: []
+      responses:
+        "200":
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, journal_mode, version]
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy]
+                    example: healthy
+                  journal_mode:
+                    type: string
+                    example: wal
+                  version:
+                    type: string
+                    example: 1.0.0
+        "503":
+          description: 服务不可用（数据库连接失败）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [unhealthy]
+                  error:
+                    type: string
+                    example: database connection failed
+
+  /api/teams:
+    get:
+      tags: [Teams]
+      summary: 列出所有团队
+      operationId: listTeams
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 团队列表（排除 archived）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [teams, total]
+                properties:
+                  teams:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Team"
+                  total:
+                    type: integer
+                    example: 2
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Teams]
+      summary: 创建新团队
+      operationId: createTeam
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTeamRequest"
+      responses:
+        "201":
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: slug 已存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/teams/{team_id}:
+    get:
+      tags: [Teams]
+      summary: 获取团队详情
+      operationId: getTeam
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TeamID"
+      responses:
+        "200":
+          description: 团队详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/api-keys:
+    get:
+      tags: [APIKeys]
+      summary: 列出 API Keys（不含明文）
+      operationId: listAPIKeys
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: team_id
+          in: query
+          required: false
+          description: 按团队过滤
+          schema:
+            type: string
+      responses:
+        "200":
+          description: API Key 列表（仅前缀，无明文）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [api_keys, total]
+                properties:
+                  api_keys:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/APIKey"
+                  total:
+                    type: integer
+                    example: 3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [APIKeys]
+      summary: 创建 API Key
+      operationId: createAPIKey
+      description: 明文 Key 仅在创建时返回一次，请妥善保存。默认 scopes 为 `["gateway","mcp"]`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAPIKeyRequest"
+      responses:
+        "201":
+          description: 创建成功（含一次性明文 Key）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateAPIKeyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/recording-health:
+    get:
+      tags: [RecordingHealth]
+      summary: 获取录入健康看板数据
+      operationId: getRecordingHealth
+      description: 返回按 request 维度投影的录入状态，供 Web 面板使用。行数据按认证团队作用域隔离。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: 每页数量（默认 50，最大 100）
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: offset
+          in: query
+          required: false
+          description: 偏移量（默认 0）
+          schema:
+            type: integer
+            default: 0
+        - name: terminal_status
+          in: query
+          required: false
+          description: 按终止状态过滤（如 complete / failed / cancelled）
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: terminal_status 的别名参数，优先使用 terminal_status
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 录入健康记录
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, limit, offset]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RecordingHealthEntry"
+                  total:
+                    type: integer
+                    example: 1234
+                  limit:
+                    type: integer
+                    example: 50
+                  offset:
+                    type: integer
+                    example: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/system/service/start:
+    post:
+      tags: [System]
+      summary: 启动 Gateway 服务
+      operationId: startService
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 启动指令已受理
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: service start initiated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: 服务已在运行
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/system/service/stop:
+    post:
+      tags: [System]
+      summary: 停止 Gateway 服务（自终止）
+      operationId: stopService
+      description: 返回成功后约 1 秒进程退出。
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 停止指令已受理
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: service stop initiated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/system/service/restart:
+    post:
+      tags: [System]
+      summary: 重启 Gateway 服务
+      operationId: restartService
+      description: 返回成功后先拉起新实例再退出当前实例。
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 重启指令已受理
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: service restart initiated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/system/service/status:
+    get:
+      tags: [System]
+      summary: 获取服务运行状态
+      operationId: getServiceStatus
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 服务状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/system/autostart:
+    put:
+      tags: [System]
+      summary: 配置开机自启动
+      operationId: setAutostart
+      description: 仅 Windows 实现（Task Scheduler）；其他平台返回 501。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+                  example: true
+      responses:
+        "200":
+          description: 自启动配置已更新
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, message]
+                properties:
+                  enabled:
+                    type: boolean
+                  message:
+                    type: string
+                    example: autostart configuration updated
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: 当前平台未实现自启动
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/system/logs:
+    get:
+      tags: [System]
+      summary: 获取最近系统日志
+      operationId: getSystemLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: 日志条数（默认 100）
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: 日志条目数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LogEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/system/backup:
+    post:
+      tags: [System]
+      summary: 导出系统配置备份
+      operationId: backupConfig
+      description: 响应带 `Content-Disposition` 附件头，返回 JSON 配置。
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 配置备份（JSON）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exported_at:
+                    type: string
+                    format: date-time
+                  version:
+                    type: string
+                    example: 1.0.0
+                  db_path:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/system/restore:
+    post:
+      tags: [System]
+      summary: 导入系统配置备份
+      operationId: restoreConfig
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: 由 POST /api/system/backup 导出的任意配置对象
+              example:
+                exported_at: 2026-08-19T10:00:00Z
+                version: 1.0.0
+                db_path: F:\memory_plus\gateway\data\gateway.db
+      responses:
+        "200":
+          description: 导入成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: configuration imported successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/system/config:
+    get:
+      tags: [System]
+      summary: 获取系统配置
+      operationId: getSystemConfig
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 系统配置
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemConfigResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/identity-cards/{id}/bind-agent:
+    post:
+      tags: [IdentityCards]
+      summary: 将 Agent 绑定到身份卡
+      operationId: bindAgent
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdentityCardID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id]
+              properties:
+                agent_id:
+                  type: string
+                  example: agent_def456
+      responses:
+        "200":
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindAgentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/identity-cards/{id}/test-connection:
+    post:
+      tags: [IdentityCards]
+      summary: 测试已绑定 Agent 的连接
+      operationId: testAgentConnection
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdentityCardID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id:
+                  type: string
+      responses:
+        "200":
+          description: 连接测试结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestConnectionResponse"
+        "400":
+          description: 未绑定 Agent 或参数错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---------------------------------------------------------------------------
+  # MCP 内部 API（需 mcp scope）
+  # ---------------------------------------------------------------------------
+
+  /api/mcp/memory/search:
+    post:
+      tags: [MCP]
+      summary: 语义搜索记忆资产
+      operationId: mcpMemorySearch
+      description: 在团队记忆库中检索与 query 最相关的资产（FTS + 语义向量融合）。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemorySearchRequest"
+      responses:
+        "200":
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, truncated]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MemorySearchHit"
+                  truncated:
+                    type: boolean
+                    description: 检索结果是否因 token 预算被截断
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/memory/get:
+    post:
+      tags: [MCP]
+      summary: 获取单个记忆资产详情
+      operationId: mcpMemoryGet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryGetRequest"
+      responses:
+        "200":
+          description: 资产详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryGetResponse"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "404":
+          $ref: "#/components/responses/MCPNotFound"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/memory/append:
+    post:
+      tags: [MCP]
+      summary: 追加记忆资产（唯一的写工具）
+      operationId: mcpMemoryAppend
+      description: 经 SQLite 事务层写入 L1 资产。相同内容去重（内容哈希 slug），重复追加返回 409。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryAppendRequest"
+      responses:
+        "201":
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryAppendResponse"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "409":
+          description: 相同内容的记忆已存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/wiki/search:
+    post:
+      tags: [MCP]
+      summary: 搜索 Wiki 页面
+      operationId: mcpWikiSearch
+      description: FTS5 优先，失败或未命中时回退 LIKE 扫描。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WikiSearchRequest"
+      responses:
+        "200":
+          description: Wiki 搜索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WikiSearchHit"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/codegraph/impact:
+    post:
+      tags: [MCP]
+      summary: 代码符号影响分析
+      operationId: mcpCodeGraphImpact
+      description: 查找符号/文件并沿调用方向遍历，返回受影响的调用方/被调方与文件列表。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeGraphImpactRequest"
+      responses:
+        "200":
+          description: 影响分析结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeGraphImpactResponse"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "404":
+          $ref: "#/components/responses/MCPNotFound"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/skill/search:
+    post:
+      tags: [MCP]
+      summary: 搜索技能库
+      operationId: mcpSkillSearch
+      description: 按名称/显示名/触发边界子串匹配，可选状态与版本过滤。steps_summary 最多返回 3 步。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillSearchRequest"
+      responses:
+        "200":
+          description: 技能搜索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SkillSearchHit"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/binding/get:
+    post:
+      tags: [MCP]
+      summary: 获取会话绑定信息
+      operationId: mcpBindingGet
+      description: 按 conversation_id 或 session_id 查询会话绑定（team/agent/identity card）。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindingGetRequest"
+      responses:
+        "200":
+          description: 绑定详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindingGetResponse"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "404":
+          $ref: "#/components/responses/MCPNotFound"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  /api/mcp/assets/list:
+    post:
+      tags: [MCP]
+      summary: 列出团队记忆资产
+      operationId: mcpAssetsList
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetsListRequest"
+      responses:
+        "200":
+          description: 资产列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assets]
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AssetListItem"
+        "400":
+          $ref: "#/components/responses/MCPBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MCPForbidden"
+        "500":
+          $ref: "#/components/responses/MCPInternalError"
+
+  # ---------------------------------------------------------------------------
+  # 网关 LLM 代理端点（需认证 + 幂等性）
+  # ---------------------------------------------------------------------------
+
+  /v1/messages:
+    post:
+      tags: [Gateway]
+      summary: 代理 Anthropic Messages API（默认通道）
+      operationId: proxyAnthropicMessages
+      description: |
+        将请求代理到 team 的 `default` 上游通道。请求/响应结构与 Anthropic Messages API 一致（透传）。
+
+        支持流式响应（请求体 `stream: true`，响应为 SSE）。
+
+        幂等性：携带 `Idempotency-Key` 请求头时，24 小时内相同 Key 与相同请求体返回缓存响应，
+        不重复调用上游。不同请求体复用同一 Key 返回 409。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ConversationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicMessagesRequest"
+      responses:
+        "200":
+          description: Anthropic Messages 响应（上游透传）
+          headers:
+            X-Request-ID:
+              description: 网关生成的请求 ID
+              schema:
+                type: string
+            X-Recording-Degraded:
+              description: 录入降级标记（事件写入本地缓冲而非 SQLite 时存在）
+              schema:
+                type: string
+                enum: [buffer]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicMessagesResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/GatewayError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/GatewayNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "502":
+          $ref: "#/components/responses/GatewayUpstreamError"
+        "503":
+          $ref: "#/components/responses/GatewayUnavailable"
+
+  /claude-code/{channel}/v1/messages:
+    post:
+      tags: [Gateway]
+      summary: 代理 Anthropic Messages API（指定通道）
+      operationId: proxyAnthropicMessagesChannel
+      description: 与 `POST /v1/messages` 相同，通过路径参数指定上游通道名。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Channel"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ConversationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicMessagesRequest"
+      responses:
+        "200":
+          description: Anthropic Messages 响应（上游透传）
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+            X-Recording-Degraded:
+              schema:
+                type: string
+                enum: [buffer]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicMessagesResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/GatewayError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/GatewayNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "502":
+          $ref: "#/components/responses/GatewayUpstreamError"
+        "503":
+          $ref: "#/components/responses/GatewayUnavailable"
+
+  /codebuddy/{channel}/v1/chat/completions:
+    post:
+      tags: [Gateway]
+      summary: 代理 OpenAI Chat Completions API（CodeBuddy 通道）
+      operationId: proxyChatCompletionsCodeBuddy
+      description: 请求/响应结构与 OpenAI Chat Completions API 一致（透传），支持流式响应。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Channel"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ConversationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionsRequest"
+      responses:
+        "200":
+          description: Chat Completions 响应（上游透传）
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+            X-Recording-Degraded:
+              schema:
+                type: string
+                enum: [buffer]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionsResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/GatewayError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/GatewayNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "502":
+          $ref: "#/components/responses/GatewayUpstreamError"
+        "503":
+          $ref: "#/components/responses/GatewayUnavailable"
+
+  /dsh/{channel}/v1/chat/completions:
+    post:
+      tags: [Gateway]
+      summary: 代理 OpenAI Chat Completions API（DSH 通道）
+      operationId: proxyChatCompletionsDSH
+      description: 与 `/codebuddy/{channel}/v1/chat/completions` 相同，仅路径前缀不同（DSH 运行时使用）。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Channel"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ConversationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionsRequest"
+      responses:
+        "200":
+          description: Chat Completions 响应（上游透传）
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+            X-Recording-Degraded:
+              schema:
+                type: string
+                enum: [buffer]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionsResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/GatewayError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/GatewayNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "502":
+          $ref: "#/components/responses/GatewayUpstreamError"
+        "503":
+          $ref: "#/components/responses/GatewayUnavailable"
+
+  /codex/{channel}/v1/responses:
+    post:
+      tags: [Gateway]
+      summary: 代理 OpenAI Responses API（Codex 通道）
+      operationId: proxyResponsesV1
+      description: |
+        请求/响应结构与 OpenAI Responses API 一致（透传），支持流式响应。
+
+        幂等性：除 `Idempotency-Key` 请求头外，也接受请求体中的 `idempotency_key` 字段。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Channel"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ConversationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponsesRequest"
+      responses:
+        "200":
+          description: Responses 响应（上游透传）
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+            X-Recording-Degraded:
+              schema:
+                type: string
+                enum: [buffer]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponsesResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/GatewayError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/GatewayNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "502":
+          $ref: "#/components/responses/GatewayUpstreamError"
+        "503":
+          $ref: "#/components/responses/GatewayUnavailable"
+
+  /codex/{channel}/responses:
+    post:
+      tags: [Gateway]
+      summary: 代理 OpenAI Responses API（无 /v1 前缀，Codex Runtime 兼容）
+      operationId: proxyResponsesLegacy
+      description: 与 `POST /codex/{channel}/v1/responses` 相同，兼容无 `/v1` 前缀的 Codex Runtime 调用。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Channel"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ConversationID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponsesRequest"
+      responses:
+        "200":
+          description: Responses 响应（上游透传）
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+            X-Recording-Degraded:
+              schema:
+                type: string
+                enum: [buffer]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponsesResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/GatewayError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/GatewayNotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "502":
+          $ref: "#/components/responses/GatewayUpstreamError"
+        "503":
+          $ref: "#/components/responses/GatewayUnavailable"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "`Authorization: Bearer <api_key>`。API Key 形如 `gw_...`，通过 `POST /api/api-keys` 创建。"
+
+  parameters:
+    TeamID:
+      name: team_id
+      in: path
+      required: true
+      description: 团队 ID
+      schema:
+        type: string
+        example: team_abc123
+    IdentityCardID:
+      name: id
+      in: path
+      required: true
+      description: 身份卡 ID
+      schema:
+        type: string
+        example: id_card_ghi789
+    Channel:
+      name: channel
+      in: path
+      required: true
+      description: 上游通道名（如 `default`），未配置的通道名由协议别名解析
+      schema:
+        type: string
+        example: default
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        幂等性 Key。24 小时内相同 Key + 相同请求体返回缓存响应；相同 Key 但请求体不同返回 409。
+        响应协议还接受请求体中的 `idempotency_key` 字段。
+      schema:
+        type: string
+        example: 550e8400-e29b-41d4-a716-446655440000
+    ConversationID:
+      name: X-Conversation-ID
+      in: header
+      required: false
+      description: 会话 ID，用于解析会话绑定（team/agent/identity card）与记忆检索作用域。缺省时为请求 ID。
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: 参数错误或格式错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: 认证失败（缺少或无效的 API Key）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: 服务器内部错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MCPBadRequest:
+      description: 参数错误（含 request_id）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MCPError"
+    MCPForbidden:
+      description: 权限不足或 team 不匹配（含 request_id）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MCPError"
+    MCPNotFound:
+      description: 资源不存在（含 request_id）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MCPError"
+    MCPInternalError:
+      description: 服务器内部错误（含 request_id）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MCPError"
+    GatewayError:
+      description: 网关协议错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+    GatewayNotFound:
+      description: 上游通道不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+    IdempotencyConflict:
+      description: 幂等性冲突（同一 Key 已用于不同请求体或请求仍在处理中）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+    GatewayUpstreamError:
+      description: 上游请求失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+    GatewayUnavailable:
+      description: 上游通道禁用或记忆录入不可用（拒绝转发）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+
+  schemas:
+    Error:
+      type: object
+      required: [type, message]
+      properties:
+        type:
+          type: string
+          description: 错误类型（invalid_request / not_found / conflict / internal_error / ...）
+          example: not_found
+        message:
+          type: string
+          description: 人类可读错误描述（纯文本）
+          example: team not found
+        request_id:
+          type: string
+          description: 请求 ID（部分端点提供，用于排查问题）
+          example: req_xyz789
+    AuthError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+              enum: [authentication_error]
+              example: authentication_error
+            message:
+              type: string
+              example: Missing API key
+    MCPError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, message, request_id]
+          properties:
+            type:
+              type: string
+              example: invalid_request
+            message:
+              type: string
+              example: query is required
+            request_id:
+              type: string
+              example: req_xyz789
+    GatewayError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+              enum: [invalid_request, unauthorized, not_found, protocol_mismatch, idempotency_conflict, channel_disabled, recording_unavailable, recording_error, configuration_error, upstream_error, internal_error]
+              example: not_found
+            message:
+              type: string
+              example: Upstream channel not found
+            request_id:
+              type: string
+              description: 网关生成的请求 ID
+              example: req_xyz789
+
+    Team:
+      type: object
+      required: [id, name, slug, visibility, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          example: team_abc123
+        name:
+          type: string
+          example: Demo Team
+        slug:
+          type: string
+          example: demo-team
+        description:
+          type: string
+        visibility:
+          type: string
+          enum: [private, team, restricted]
+          example: private
+        status:
+          type: string
+          enum: [active, archived]
+          example: active
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateTeamRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+          description: 团队名称
+          example: Demo Team
+        slug:
+          type: string
+          description: 团队唯一标识（URL 友好）
+          example: demo-team
+        description:
+          type: string
+          description: 团队描述（可选）
+          example: A demo team for testing
+        visibility:
+          type: string
+          enum: [private, team, restricted]
+          description: 可见性，默认 private
+          default: private
+          example: private
+
+    APIKey:
+      type: object
+      required: [id, team_id, key_hash_prefix, scopes, enabled, created_at]
+      properties:
+        id:
+          type: string
+          example: key_xyz789
+        team_id:
+          type: string
+          example: team_abc123
+        key_hash_prefix:
+          type: string
+          description: Key 哈希前缀（仅前 8 字符，加省略号）
+          example: a1b2c3d4...
+        scopes:
+          type: string
+          description: 权限范围（JSON 字符串数组）
+          example: '["gateway","mcp"]'
+        enabled:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+
+    CreateAPIKeyRequest:
+      type: object
+      required: [team_id]
+      properties:
+        team_id:
+          type: string
+          description: 所属团队 ID
+          example: team_abc123
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [gateway, mcp, admin]
+          description: 权限范围，默认 ["gateway","mcp"]
+          default: ["gateway", "mcp"]
+          example: ["gateway", "mcp"]
+
+    CreateAPIKeyResponse:
+      type: object
+      required: [id, team_id, key, key_hash_prefix, scopes, enabled, created_at]
+      properties:
+        id:
+          type: string
+          example: key_xyz789
+        team_id:
+          type: string
+          example: team_abc123
+        key:
+          type: string
+          description: 明文 Key（仅创建时返回一次）
+          example: gw_abc123def456...
+        key_hash_prefix:
+          type: string
+          example: a1b2c3d4
+        scopes:
+          type: string
+          example: '["gateway","mcp"]'
+        enabled:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+
+    RecordingHealthEntry:
+      type: object
+      required: [request_id, conversation_id, compensation_status]
+      properties:
+        request_id:
+          type: string
+          example: req_abc123
+        conversation_id:
+          type: string
+          example: conv_xyz789
+        session_id:
+          type: string
+          example: sess_aaa111
+        inbound_at:
+          type: string
+          format: date-time
+        terminal_at:
+          type: string
+          format: date-time
+        terminal_status:
+          type: string
+          example: complete
+        content_hash:
+          type: string
+          example: sha256:abc...
+        l0_path:
+          type: string
+          example: L0_每一轮记录/2026-08-19/req_abc123.jsonl
+        binding_version:
+          type: integer
+          example: 1
+        compensation_status:
+          type: string
+          enum: [ok, pending]
+          example: ok
+        last_success_at:
+          type: string
+          format: date-time
+
+    ServiceStatusResponse:
+      type: object
+      required: [running, version]
+      properties:
+        running:
+          type: boolean
+          example: true
+        pid:
+          type: integer
+          example: 12345
+        uptime:
+          type: string
+          example: running
+        version:
+          type: string
+          example: 1.0.0
+
+    SystemConfigResponse:
+      type: object
+      required: [autostart_enabled, db_path]
+      properties:
+        autostart_enabled:
+          type: boolean
+          example: true
+        db_path:
+          type: string
+        obsidian_path:
+          type: string
+        vector_path:
+          type: string
+
+    LogEntry:
+      type: object
+      required: [timestamp, level, message]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          type: string
+          example: info
+        message:
+          type: string
+          example: event
+
+    BindAgentResponse:
+      type: object
+      required: [identity_card_id, agent_id, name, status]
+      properties:
+        identity_card_id:
+          type: string
+          example: id_card_ghi789
+        agent_id:
+          type: string
+          example: agent_def456
+        name:
+          type: string
+        status:
+          type: string
+
+    TestConnectionResponse:
+      type: object
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: agent connection verified
+        agent_id:
+          type: string
+          example: agent_def456
+
+    MemorySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          description: 搜索关键词（必填）
+          example: authentication implementation
+        team_id:
+          type: string
+          description: 团队 ID（可选，默认取 API Key 所属团队）
+        identity_card_id:
+          type: string
+          description: 身份卡过滤（可选）
+        limit:
+          type: integer
+          description: 返回数量上限
+          example: 10
+        layer:
+          type: string
+          description: 按资产层级过滤（如 l0/l1/l2/l3/l4）
+          example: l1
+
+    MemorySearchHit:
+      type: object
+      required: [asset_id, asset_type, score]
+      properties:
+        asset_id:
+          type: string
+        asset_type:
+          type: string
+          example: l1
+        layer:
+          type: string
+        summary:
+          type: string
+        visibility:
+          type: string
+        source_event_ids:
+          type: array
+          items:
+            type: string
+        score:
+          type: number
+          format: float
+          example: 0.92
+        version:
+          type: integer
+        snippet:
+          type: string
+
+    MemoryGetRequest:
+      type: object
+      required: [asset_id]
+      properties:
+        asset_id:
+          type: string
+          description: 资产 ID（必填）
+          example: asset_abc123
+        team_id:
+          type: string
+
+    MemoryGetResponse:
+      type: object
+      required: [asset_id, asset_type, name]
+      properties:
+        asset_id:
+          type: string
+        asset_type:
+          type: string
+        name:
+          type: string
+        summary:
+          type: string
+        body:
+          type: string
+          description: 资产正文（读取自 BodyPath）
+        body_path:
+          type: string
+        source_event_ids:
+          type: array
+          items:
+            type: string
+        confidence:
+          type: number
+          format: float
+        visibility:
+          type: string
+        version:
+          type: integer
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    MemoryAppendRequest:
+      type: object
+      required: [content]
+      properties:
+        team_id:
+          type: string
+        content:
+          type: string
+          description: 追加的记忆内容（必填）
+          example: "Additional notes: remember to invalidate cache on logout."
+        source_ids:
+          type: array
+          items:
+            type: string
+          description: 来源事件 ID
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: 置信度，默认 0.8
+          default: 0.8
+        visibility:
+          type: string
+          default: private
+
+    MemoryAppendResponse:
+      type: object
+      required: [asset_id, asset_type, version, status, created_at]
+      properties:
+        asset_id:
+          type: string
+        asset_type:
+          type: string
+          example: l1
+        version:
+          type: integer
+          example: 1
+        status:
+          type: string
+          example: candidate
+        created_at:
+          type: string
+          format: date-time
+
+    WikiSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          description: 搜索关键词（必填）
+          example: deployment guide
+        team_id:
+          type: string
+        limit:
+          type: integer
+          description: 返回数量上限（默认 10，最大 50）
+          default: 10
+
+    WikiSearchHit:
+      type: object
+      required: [page_id, title, slug]
+      properties:
+        page_id:
+          type: string
+        title:
+          type: string
+        slug:
+          type: string
+        snippet:
+          type: string
+          description: 页面内容截断片段（最多 256 字符）
+        score:
+          type: number
+          format: float
+        links:
+          type: array
+          items:
+            type: string
+          description: 出链页面 ID
+
+    CodeGraphImpactRequest:
+      type: object
+      required: [repo_id]
+      properties:
+        symbol:
+          type: string
+          description: 符号名（与 file_path 至少提供一个）
+          example: AuthMiddleware
+        file_path:
+          type: string
+          example: internal/auth/middleware.go
+        repo_id:
+          type: string
+          description: 仓库 ID（必填）
+          example: repo_main
+        depth:
+          type: integer
+          description: 遍历深度，默认 3
+          default: 3
+        team_id:
+          type: string
+
+    CodeGraphImpactResponse:
+      type: object
+      required: [root, callers, callees, affected_files]
+      properties:
+        root:
+          type: object
+          required: [symbol, file, kind]
+          properties:
+            symbol:
+              type: string
+            file:
+              type: string
+            kind:
+              type: string
+        callers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImpactNode"
+        callees:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImpactNode"
+        affected_files:
+          type: array
+          items:
+            type: string
+          description: 受影响的去重文件列表（排序后）
+
+    ImpactNode:
+      type: object
+      required: [symbol, file, depth]
+      properties:
+        symbol:
+          type: string
+        file:
+          type: string
+        depth:
+          type: integer
+
+    SkillSearchRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          description: 按名称/显示名/触发边界模糊匹配
+          example: database migration
+        status:
+          type: string
+          description: 按状态过滤
+        version:
+          type: string
+          description: 按版本过滤
+        team_id:
+          type: string
+
+    SkillSearchHit:
+      type: object
+      required: [skill_id, name, version, status]
+      properties:
+        skill_id:
+          type: string
+        name:
+          type: string
+        display_name:
+          type: string
+        version:
+          type: string
+        status:
+          type: string
+        trigger_boundary:
+          type: string
+        steps_summary:
+          type: array
+          items:
+            type: string
+          description: 执行步骤（最多 3 步）
+        source_ids:
+          type: array
+          items:
+            type: string
+
+    BindingGetRequest:
+      type: object
+      properties:
+        session_id:
+          type: string
+          description: 会话 ID（与 conversation_id 至少提供一个）
+          example: sess_aaa111
+        conversation_id:
+          type: string
+          description: 会话 ID（优先）
+          example: conv_xyz789
+
+    BindingGetResponse:
+      type: object
+      required: [session_id, conversation_id, team_id, binding_version, binding_state]
+      properties:
+        session_id:
+          type: string
+        conversation_id:
+          type: string
+        team_id:
+          type: string
+        agent_id:
+          type: string
+        identity_card_id:
+          type: string
+        upstream_channel_id:
+          type: string
+        binding_version:
+          type: integer
+        binding_state:
+          type: string
+
+    AssetsListRequest:
+      type: object
+      properties:
+        team_id:
+          type: string
+        asset_type:
+          type: string
+          example: l1
+        visibility:
+          type: string
+        status:
+          type: string
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    AssetListItem:
+      type: object
+      required: [asset_id, asset_type, name]
+      properties:
+        asset_id:
+          type: string
+        asset_type:
+          type: string
+        name:
+          type: string
+        summary:
+          type: string
+        visibility:
+          type: string
+        status:
+          type: string
+        version:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+
+    # ------------------------------------------------------------------
+    # 网关 LLM 协议 Schema（透传结构）
+    # ------------------------------------------------------------------
+
+    AnthropicContentBlock:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [text, image, tool_use, tool_result]
+          example: text
+        text:
+          type: string
+          example: Hello! How can I help you today?
+
+    AnthropicMessage:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+          example: user
+        content:
+          oneOf:
+            - type: string
+              example: Hello, Claude!
+            - type: array
+              items:
+                $ref: "#/components/schemas/AnthropicContentBlock"
+
+    AnthropicMessagesRequest:
+      type: object
+      required: [model, max_tokens, messages]
+      properties:
+        model:
+          type: string
+          example: claude-opus-5
+        max_tokens:
+          type: integer
+          description: 最大生成 token 数
+          example: 1024
+        system:
+          oneOf:
+            - type: string
+            - type: array
+          description: 系统提示词（字符串或内容块数组）
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnthropicMessage"
+        tools:
+          type: array
+          items:
+            type: object
+        stream:
+          type: boolean
+          default: false
+        stop_sequences:
+          type: array
+          items:
+            type: string
+        temperature:
+          type: number
+          format: float
+        top_p:
+          type: number
+          format: float
+        top_k:
+          type: integer
+
+    AnthropicMessagesResponse:
+      type: object
+      description: 上游透传的 Anthropic Messages 响应结构
+      properties:
+        id:
+          type: string
+          example: msg_abc123
+        type:
+          type: string
+          enum: [message]
+        role:
+          type: string
+          enum: [assistant]
+        content:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnthropicContentBlock"
+        model:
+          type: string
+        stop_reason:
+          type: string
+          example: end_turn
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+
+    ChatCompletionsRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          example: gpt-4
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role]
+            properties:
+              role:
+                type: string
+                enum: [system, user, assistant, tool]
+              content:
+                oneOf:
+                  - type: string
+                  - type: array
+              tool_calls:
+                type: array
+                items:
+                  type: object
+              tool_call_id:
+                type: string
+              name:
+                type: string
+        tools:
+          type: array
+          items:
+            type: object
+        tool_choice:
+          type: object
+        stream:
+          type: boolean
+          default: false
+        temperature:
+          type: number
+          format: float
+        max_tokens:
+          type: integer
+        top_p:
+          type: number
+          format: float
+
+    ChatCompletionsResponse:
+      type: object
+      description: 上游透传的 OpenAI Chat Completions 响应结构
+      properties:
+        id:
+          type: string
+          example: chatcmpl-abc123
+        object:
+          type: string
+          enum: [chat.completion]
+        created:
+          type: integer
+          example: 1692345678
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  content:
+                    type: string
+              finish_reason:
+                type: string
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    ResponsesRequest:
+      type: object
+      required: [model]
+      properties:
+        model:
+          type: string
+          example: codex-model
+        instructions:
+          type: string
+          description: 系统指令
+        input:
+          oneOf:
+            - type: string
+            - type: array
+          description: 输入（字符串或消息项数组）
+        tools:
+          type: array
+          items:
+            type: object
+        stream:
+          type: boolean
+          default: false
+        max_output_tokens:
+          type: integer
+        temperature:
+          type: number
+          format: float
+        idempotency_key:
+          type: string
+          description: 幂等性 Key（Responses 协议的请求体字段，与 Idempotency-Key 请求头等效）
+
+    ResponsesResponse:
+      type: object
+      description: 上游透传的 OpenAI Responses 响应结构
+      properties:
+        id:
+          type: string
+          example: resp_abc123
+        object:
+          type: string
+          enum: [response]
+        model:
+          type: string
+        status:
+          type: string
+        output:
+          type: array
+          items:
+            type: object
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            total_tokens:
+              type: integer

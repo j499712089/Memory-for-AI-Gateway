@@ -29,6 +29,10 @@ func SetupRouter(db *sql.DB, secretsManager *secrets.Manager, memoryRoot string,
 	// Health endpoint (no auth required)
 	r.GET("/health", healthHandler.HandleHealth)
 
+	// API documentation (OpenAPI spec + Swagger UI), served from the docs
+	// directory. Access Swagger UI at /docs/swagger-ui/.
+	r.Static("/docs", "./docs")
+
 	// API group (requires auth)
 	api := r.Group("/api")
 	api.Use(AuthMiddleware(authMgr))
