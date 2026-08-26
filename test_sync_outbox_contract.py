@@ -809,6 +809,21 @@ check("7.5 ALL-196 legacy engine has no driver for trash/update/purge",
 check("7.6 contract engine drives all 6 op_types",
       sorted(Engine.DRIVERS), sorted(OP_TYPES))
 
+# ===== 8. atomic_write implementation contract (ALL-276) =======================
+print("\n-- 8. atomic_write implementation contract --")
+source = open(__file__, encoding="utf-8").read()
+check("8.1 atomic_write uses .tmp suffix", ".tmp" in source, True)
+check("8.2 atomic_write uses os.replace", "os.replace" in source, True)
+# Extract write_temp + rename methods to verify no direct write to target path
+write_temp_start = source.find("def write_temp(")
+rename_start = source.find("def rename(", write_temp_start)
+rename_end = source.find("\n    def ", rename_start + 1)
+if rename_end == -1:
+    rename_end = source.find("\n\nclass ", rename_start)
+atomic_impl = source[write_temp_start:rename_end] if write_temp_start != -1 and rename_start != -1 else ""
+check("8.3 atomic_write does NOT use direct write to target",
+      'open(path, "w"' not in atomic_impl and 'open(dst, "w"' not in atomic_impl, True)
+
 print()
 print("=" * 78)
 print(f"assertions run: {CHECKS}")
